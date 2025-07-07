@@ -31,7 +31,7 @@ The user cares primarily with:
 3. Update
     - [X] Changing the content of a note (to change the `body`)
     - [X] Renaming Files (to change the `title`)
-    - [ ] Renaming Folders (to change the `title`)
+    - [X] Renaming Folders (to change the `title`)
     - [ ] Moving Folders and all children recursively (e.g. `mv`)
     - [ ] Moving Files
 4. Delete
