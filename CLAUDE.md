@@ -32,8 +32,8 @@ The user cares primarily with:
     - [X] Changing the content of a note (to change the `body`)
     - [X] Renaming Files (to change the `title`)
     - [X] Renaming Folders (to change the `title`)
-    - [ ] Moving Folders and all children recursively (e.g. `mv`)
-    - [ ] Moving Files
+    - [X] Moving Folders and all children recursively (e.g. `mv`)
+    - [X] Moving Files
 4. Delete
     - [ ] Deleting Files (`rm`)
     - [ ] Deleting Folders (`rm -r`)
