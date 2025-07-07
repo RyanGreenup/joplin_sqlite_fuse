@@ -80,6 +80,18 @@ impl SqliteFS {
         Ok(current_parent_id)
     }
     
+    fn strip_md_suffix(filename: &str) -> &str {
+        filename.strip_suffix(".md").unwrap_or(filename)
+    }
+    
+    fn add_md_suffix(title: &str) -> String {
+        if title.ends_with(".md") {
+            title.to_string()
+        } else {
+            format!("{}.md", title)
+        }
+    }
+    
 }
 
 impl Filesystem for SqliteFS {
@@ -151,13 +163,15 @@ impl Filesystem for SqliteFS {
             return;
         }
         
-        // Query database for notes
+        // Query database for notes (strip .md suffix when looking up in database)
         let note_query = "SELECT id, title, body, created_time, updated_time, user_updated_time FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
         
         let note_result = {
             if let Ok(parent_folder_id) = self.get_parent_folder_id(&parent_path) {
                 if let Ok(mut stmt) = self.db.prepare(note_query) {
-                    stmt.query_row([&parent_folder_id, name_str], |row| {
+                    // Strip .md suffix when querying the database
+                    let db_title = Self::strip_md_suffix(name_str);
+                    stmt.query_row([&parent_folder_id, db_title], |row| {
                         let id: String = row.get(0)?;
                         let body: String = row.get(2)?;
                         let created_time: i64 = row.get(3)?;
@@ -272,12 +286,14 @@ impl Filesystem for SqliteFS {
             }
         }
         
-        // Query database for notes
+        // Query database for notes (strip .md suffix when looking up in database)
         let note_query = "SELECT id, title, body, created_time, updated_time, user_updated_time FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
         
         if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
             if let Ok(mut stmt) = self.db.prepare(note_query) {
-                if let Ok(note_row) = stmt.query_row([&parent_folder_id, filename], |row| {
+                // Strip .md suffix when querying the database
+                let db_title = Self::strip_md_suffix(filename);
+                if let Ok(note_row) = stmt.query_row([&parent_folder_id, db_title], |row| {
                     let body: String = row.get(2)?;
                     let created_time: i64 = row.get(3)?;
                     let updated_time: i64 = row.get(4)?;
@@ -337,12 +353,14 @@ impl Filesystem for SqliteFS {
             ("/", &path[..])
         };
         
-        // Query database for the note content
+        // Query database for the note content (strip .md suffix when looking up in database)
         let note_query = "SELECT body FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
         
         if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
             if let Ok(mut stmt) = self.db.prepare(note_query) {
-                if let Ok(body) = stmt.query_row([&parent_folder_id, filename], |row| {
+                // Strip .md suffix when querying the database
+                let db_title = Self::strip_md_suffix(filename);
+                if let Ok(body) = stmt.query_row([&parent_folder_id, db_title], |row| {
                     let body: String = row.get(0)?;
                     Ok(body)
                 }) {
@@ -448,13 +466,15 @@ impl Filesystem for SqliteFS {
         };
         
         for title in note_titles {
+            // Add .md suffix to note titles for filesystem display
+            let display_title = Self::add_md_suffix(&title);
             let full_path = if path == "/" {
-                format!("/{}", title)
+                format!("/{}", display_title)
             } else {
-                format!("{}/{}", path, title)
+                format!("{}/{}", path, display_title)
             };
             let inode = self.get_or_create_inode(&full_path);
-            entries.push((inode, FileType::RegularFile, title));
+            entries.push((inode, FileType::RegularFile, display_title));
         }
         
         // Handle path conflicts - if there are duplicate titles, favor the most recent based on user_updated_time
@@ -634,7 +654,7 @@ mod tests {
         assert_eq!(body, "This is a test note in Documents folder");
         
         // Test inode mapping
-        let readme_inode = fs.get_or_create_inode("/readme.txt");
+        let readme_inode = fs.get_or_create_inode("/readme.txt.md");
         let documents_inode = fs.get_or_create_inode("/Documents");
         
         // Verify inodes are unique
@@ -644,7 +664,7 @@ mod tests {
         
         // Test path resolution
         assert_eq!(fs.get_path_from_inode(1), Some(&"/".to_string()));
-        assert_eq!(fs.get_path_from_inode(readme_inode), Some(&"/readme.txt".to_string()));
+        assert_eq!(fs.get_path_from_inode(readme_inode), Some(&"/readme.txt.md".to_string()));
         assert_eq!(fs.get_path_from_inode(documents_inode), Some(&"/Documents".to_string()));
         
         println!("All tests passed!");
@@ -785,17 +805,22 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         
-        let projects_notes: Vec<String> = fs.db.prepare("SELECT title FROM notes WHERE parent_id = 'projects' AND deleted_time = 0")
+        let projects_notes_raw: Vec<String> = fs.db.prepare("SELECT title FROM notes WHERE parent_id = 'projects' AND deleted_time = 0")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
             .filter_map(Result::ok)
             .collect();
         
+        // Convert raw database titles to filesystem display titles (with .md suffix)
+        let projects_notes: Vec<String> = projects_notes_raw.iter()
+            .map(|title| SqliteFS::add_md_suffix(title))
+            .collect();
+        
         assert_eq!(projects_folders.len(), 2);
         assert!(projects_folders.contains(&"RustProject".to_string()));
         assert!(projects_folders.contains(&"PythonProject".to_string()));
-        assert_eq!(projects_notes, vec!["overview.txt"]);
+        assert_eq!(projects_notes, vec!["overview.txt.md"]);
         println!("  ✓ Found folders: {:?}", projects_folders);
         println!("  ✓ Found files: {:?}", projects_notes);
         
@@ -808,32 +833,42 @@ mod tests {
             .filter_map(Result::ok)
             .collect();
         
-        let rust_notes: Vec<String> = fs.db.prepare("SELECT title FROM notes WHERE parent_id = 'rust_project' AND deleted_time = 0")
+        let rust_notes_raw: Vec<String> = fs.db.prepare("SELECT title FROM notes WHERE parent_id = 'rust_project' AND deleted_time = 0")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
             .filter_map(Result::ok)
+            .collect();
+        
+        // Convert raw database titles to filesystem display titles (with .md suffix)
+        let rust_notes: Vec<String> = rust_notes_raw.iter()
+            .map(|title| SqliteFS::add_md_suffix(title))
             .collect();
         
         assert_eq!(rust_folders.len(), 2);
         assert!(rust_folders.contains(&"src".to_string()));
         assert!(rust_folders.contains(&"tests".to_string()));
-        assert_eq!(rust_notes, vec!["Cargo.toml"]);
+        assert_eq!(rust_notes, vec!["Cargo.toml.md"]);
         println!("  ✓ Found folders: {:?}", rust_folders);
         println!("  ✓ Found files: {:?}", rust_notes);
         
         // Test Level 4: src folder contents (deepest level)
         println!("Testing Level 4 (src):");
-        let src_files: Vec<String> = fs.db.prepare("SELECT title FROM notes WHERE parent_id = 'rust_src' AND deleted_time = 0")
+        let src_files_raw: Vec<String> = fs.db.prepare("SELECT title FROM notes WHERE parent_id = 'rust_src' AND deleted_time = 0")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
             .filter_map(Result::ok)
             .collect();
         
+        // Convert raw database titles to filesystem display titles (with .md suffix)
+        let src_files: Vec<String> = src_files_raw.iter()
+            .map(|title| SqliteFS::add_md_suffix(title))
+            .collect();
+        
         assert_eq!(src_files.len(), 2);
-        assert!(src_files.contains(&"main.rs".to_string()));
-        assert!(src_files.contains(&"lib.rs".to_string()));
+        assert!(src_files.contains(&"main.rs.md".to_string()));
+        assert!(src_files.contains(&"lib.rs.md".to_string()));
         println!("  ✓ Found files: {:?}", src_files);
         
         // Test deep path navigation and file content retrieval
@@ -843,7 +878,7 @@ mod tests {
         let projects_inode = fs.get_or_create_inode("/Projects");
         let rust_project_inode = fs.get_or_create_inode("/Projects/RustProject");
         let src_inode = fs.get_or_create_inode("/Projects/RustProject/src");
-        let main_rs_inode = fs.get_or_create_inode("/Projects/RustProject/src/main.rs");
+        let main_rs_inode = fs.get_or_create_inode("/Projects/RustProject/src/main.rs.md");
         
         // Verify all inodes are unique
         let inodes = vec![1, projects_inode, rust_project_inode, src_inode, main_rs_inode];
@@ -856,7 +891,7 @@ mod tests {
         assert_eq!(fs.get_path_from_inode(projects_inode), Some(&"/Projects".to_string()));
         assert_eq!(fs.get_path_from_inode(rust_project_inode), Some(&"/Projects/RustProject".to_string()));
         assert_eq!(fs.get_path_from_inode(src_inode), Some(&"/Projects/RustProject/src".to_string()));
-        assert_eq!(fs.get_path_from_inode(main_rs_inode), Some(&"/Projects/RustProject/src/main.rs".to_string()));
+        assert_eq!(fs.get_path_from_inode(main_rs_inode), Some(&"/Projects/RustProject/src/main.rs.md".to_string()));
         println!("  ✓ Path resolution works for all levels");
         
         // Test file content retrieval at different levels
