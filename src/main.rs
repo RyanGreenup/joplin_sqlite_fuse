@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(1); // 1 second
 
-
 struct SqliteFS {
     db: Connection,
     inode_map: HashMap<String, u64>,
@@ -29,147 +28,146 @@ impl SqliteFS {
             reverse_inode_map: HashMap::new(),
             next_inode: 2,
         };
-        
+
         // Root directory gets inode 1
         fs.inode_map.insert("/".to_string(), 1);
         fs.reverse_inode_map.insert(1, "/".to_string());
-        
+
         Ok(fs)
     }
-    
+
     fn get_or_create_inode(&mut self, path: &str) -> u64 {
         if let Some(&inode) = self.inode_map.get(path) {
             return inode;
         }
-        
+
         let inode = self.next_inode;
         self.next_inode += 1;
         self.inode_map.insert(path.to_string(), inode);
         self.reverse_inode_map.insert(inode, path.to_string());
         inode
     }
-    
+
     fn get_path_from_inode(&self, inode: u64) -> Option<&String> {
         self.reverse_inode_map.get(&inode)
     }
-    
+
     fn get_parent_folder_id(&self, parent_path: &str) -> Result<String> {
         if parent_path == "/" {
             // Root directory - empty parent_id
             return Ok("".to_string());
         }
-        
+
         // Split the path and find the folder ID by walking through the hierarchy
         let path_parts: Vec<&str> = parent_path.trim_start_matches('/').split('/').collect();
         let mut current_parent_id = "".to_string();
-        
+
         for part in path_parts {
             if part.is_empty() {
                 continue;
             }
-            
+
             // Find the folder with this title under current_parent_id
             let folder_id: String = self.db.query_row(
                 "SELECT id FROM folders WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
                 [&current_parent_id, part],
                 |row| row.get(0)
             )?;
-            
+
             current_parent_id = folder_id;
         }
-        
+
         Ok(current_parent_id)
     }
-    
+
     fn strip_md_suffix(filename: &str) -> &str {
         filename.strip_suffix(".md").unwrap_or(filename)
     }
-    
+
     fn add_md_suffix(title: &str) -> String {
         if title.ends_with(".md") {
             title.to_string()
         } else {
-            format!("{}.md", title)
+            format!("{title}.md")
         }
     }
-    
+
     /// Generate a UUID v4 string for database record IDs
     fn generate_uuid() -> String {
         Uuid::new_v4().to_string()
     }
-    
+
     /// Create a new folder in the database
-    /// 
+    ///
     /// This helper method handles the database insertion for new folders,
     /// including UUID generation, timestamp management, and parent relationship setup.
-    /// 
+    ///
     /// Arguments:
     /// - parent_path: Filesystem path of the parent directory (e.g., "/Projects")
     /// - folder_name: Name of the new folder to create
-    /// 
+    ///
     /// Returns:
     /// - Ok(String): UUID of the newly created folder
     /// - Err: Database error if insertion fails
     fn create_folder(&mut self, parent_path: &str, folder_name: &str) -> Result<String> {
         // Get the parent folder ID
         let parent_folder_id = self.get_parent_folder_id(parent_path)?;
-        
+
         // Generate new UUID for the folder
         let folder_id = Self::generate_uuid();
-        
+
         // Get current timestamp
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        
+
         // Insert new folder into database
         self.db.execute(
             "INSERT INTO folders (id, title, created_time, updated_time, user_created_time, user_updated_time, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             [&folder_id, folder_name, &now.to_string(), &now.to_string(), &now.to_string(), &now.to_string(), &parent_folder_id],
         )?;
-        
+
         Ok(folder_id)
     }
-    
+
     /// Create a new note (file) in the database
-    /// 
+    ///
     /// This helper method handles the database insertion for new notes,
     /// including UUID generation, content storage, and parent relationship setup.
-    /// 
+    ///
     /// Arguments:
     /// - parent_path: Filesystem path of the parent directory (e.g., "/Projects")
     /// - file_name: Name of the new file (with .md suffix, will be stripped for DB)
     /// - content: Initial content to store in the note's body field
-    /// 
+    ///
     /// Returns:
     /// - Ok(String): UUID of the newly created note
     /// - Err: Database error if insertion fails
     fn create_note(&mut self, parent_path: &str, file_name: &str, content: &str) -> Result<String> {
         // Get the parent folder ID
         let parent_folder_id = self.get_parent_folder_id(parent_path)?;
-        
+
         // Strip .md suffix from filename for database storage
         let note_title = Self::strip_md_suffix(file_name);
-        
+
         // Generate new UUID for the note
         let note_id = Self::generate_uuid();
-        
+
         // Get current timestamp
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        
+
         // Insert new note into database
         self.db.execute(
             "INSERT INTO notes (id, title, body, created_time, updated_time, user_created_time, user_updated_time, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             [&note_id, note_title, content, &now.to_string(), &now.to_string(), &now.to_string(), &now.to_string(), &parent_folder_id],
         )?;
-        
+
         Ok(note_id)
     }
-    
 }
 
 impl Filesystem for SqliteFS {
@@ -181,7 +179,7 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
-        
+
         // Get parent path
         let parent_path = match self.get_path_from_inode(parent) {
             Some(path) => path.clone(),
@@ -190,17 +188,17 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
-        
+
         // Construct full path
         let full_path = if parent_path == "/" {
-            format!("/{}", name_str)
+            format!("/{name_str}")
         } else {
-            format!("{}/{}", parent_path, name_str)
+            format!("{parent_path}/{name_str}")
         };
-        
+
         // Query database for folders first
         let folder_query = "SELECT id, title, created_time, updated_time, user_updated_time FROM folders WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
-        
+
         let folder_result = {
             if let Ok(parent_folder_id) = self.get_parent_folder_id(&parent_path) {
                 if let Ok(mut stmt) = self.db.prepare(folder_query) {
@@ -209,7 +207,8 @@ impl Filesystem for SqliteFS {
                         let created_time: i64 = row.get(2)?;
                         let updated_time: i64 = row.get(3)?;
                         Ok((id, created_time, updated_time))
-                    }).ok()
+                    })
+                    .ok()
                 } else {
                     None
                 }
@@ -217,7 +216,7 @@ impl Filesystem for SqliteFS {
                 None
             }
         };
-        
+
         if let Some(folder_row) = folder_result {
             let inode = self.get_or_create_inode(&full_path);
             let attr = FileAttr {
@@ -240,10 +239,10 @@ impl Filesystem for SqliteFS {
             reply.entry(&TTL, &attr, 0);
             return;
         }
-        
+
         // Query database for notes (strip .md suffix when looking up in database)
         let note_query = "SELECT id, title, body, created_time, updated_time, user_updated_time FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
-        
+
         let note_result = {
             if let Ok(parent_folder_id) = self.get_parent_folder_id(&parent_path) {
                 if let Ok(mut stmt) = self.db.prepare(note_query) {
@@ -255,7 +254,8 @@ impl Filesystem for SqliteFS {
                         let created_time: i64 = row.get(3)?;
                         let updated_time: i64 = row.get(4)?;
                         Ok((id, body, created_time, updated_time))
-                    }).ok()
+                    })
+                    .ok()
                 } else {
                     None
                 }
@@ -263,13 +263,13 @@ impl Filesystem for SqliteFS {
                 None
             }
         };
-        
+
         if let Some(note_row) = note_result {
             let inode = self.get_or_create_inode(&full_path);
             let attr = FileAttr {
                 ino: inode,
                 size: note_row.1.len() as u64,
-                blocks: ((note_row.1.len() + 511) / 512) as u64,
+                blocks: note_row.1.len().div_ceil(512) as u64,
                 atime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
                 mtime: UNIX_EPOCH + Duration::from_secs(note_row.3 as u64),
                 ctime: UNIX_EPOCH + Duration::from_secs(note_row.3 as u64),
@@ -286,7 +286,7 @@ impl Filesystem for SqliteFS {
             reply.entry(&TTL, &attr, 0);
             return;
         }
-        
+
         reply.error(ENOENT);
     }
 
@@ -313,7 +313,7 @@ impl Filesystem for SqliteFS {
             reply.attr(&TTL, &attr);
             return;
         }
-        
+
         let path = match self.get_path_from_inode(ino) {
             Some(path) => path.clone(),
             None => {
@@ -321,7 +321,7 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
-        
+
         // Extract the filename and parent path
         let (parent_path, filename) = if let Some(pos) = path.rfind('/') {
             let parent = &path[..pos];
@@ -330,10 +330,10 @@ impl Filesystem for SqliteFS {
         } else {
             ("/", &path[..])
         };
-        
+
         // Query database for folders first
         let folder_query = "SELECT id, title, created_time, updated_time, user_updated_time FROM folders WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
-        
+
         if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
             if let Ok(mut stmt) = self.db.prepare(folder_query) {
                 if let Ok(folder_row) = stmt.query_row([&parent_folder_id, filename], |row| {
@@ -363,10 +363,10 @@ impl Filesystem for SqliteFS {
                 }
             }
         }
-        
+
         // Query database for notes (strip .md suffix when looking up in database)
         let note_query = "SELECT id, title, body, created_time, updated_time, user_updated_time FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
-        
+
         if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
             if let Ok(mut stmt) = self.db.prepare(note_query) {
                 // Strip .md suffix when querying the database
@@ -381,7 +381,7 @@ impl Filesystem for SqliteFS {
                     let attr = FileAttr {
                         ino,
                         size: content_size as u64,
-                        blocks: ((content_size + 511) / 512) as u64,
+                        blocks: content_size.div_ceil(512) as u64,
                         atime: UNIX_EPOCH + Duration::from_secs(note_row.1 as u64),
                         mtime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
                         ctime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
@@ -400,7 +400,7 @@ impl Filesystem for SqliteFS {
                 }
             }
         }
-        
+
         reply.error(ENOENT);
     }
 
@@ -422,7 +422,7 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
-        
+
         // Extract the filename and parent path
         let (parent_path, filename) = if let Some(pos) = path.rfind('/') {
             let parent = &path[..pos];
@@ -431,10 +431,10 @@ impl Filesystem for SqliteFS {
         } else {
             ("/", &path[..])
         };
-        
+
         // Query database for the note content (strip .md suffix when looking up in database)
         let note_query = "SELECT body FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
-        
+
         if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
             if let Ok(mut stmt) = self.db.prepare(note_query) {
                 // Strip .md suffix when querying the database
@@ -454,7 +454,7 @@ impl Filesystem for SqliteFS {
                 }
             }
         }
-        
+
         reply.error(ENOENT);
     }
 
@@ -473,12 +473,12 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
-        
+
         let mut entries = vec![
             (ino, FileType::Directory, ".".to_string()),
             (1, FileType::Directory, "..".to_string()),
         ];
-        
+
         // Get the parent folder ID for this directory
         let parent_folder_id = match self.get_parent_folder_id(&path) {
             Ok(id) => id,
@@ -487,7 +487,7 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
-        
+
         // Query folders
         let folder_query = "SELECT id, title FROM folders WHERE parent_id = ?1 AND deleted_time = 0 ORDER BY user_updated_time DESC";
         let folder_titles = {
@@ -510,17 +510,17 @@ impl Filesystem for SqliteFS {
                 Vec::new()
             }
         };
-        
+
         for title in folder_titles {
             let full_path = if path == "/" {
-                format!("/{}", title)
+                format!("/{title}")
             } else {
-                format!("{}/{}", path, title)
+                format!("{path}/{title}")
             };
             let inode = self.get_or_create_inode(&full_path);
             entries.push((inode, FileType::Directory, title));
         }
-        
+
         // Query notes
         let note_query = "SELECT id, title FROM notes WHERE parent_id = ?1 AND deleted_time = 0 ORDER BY user_updated_time DESC";
         let note_titles = {
@@ -543,23 +543,23 @@ impl Filesystem for SqliteFS {
                 Vec::new()
             }
         };
-        
+
         for title in note_titles {
             // Add .md suffix to note titles for filesystem display
             let display_title = Self::add_md_suffix(&title);
             let full_path = if path == "/" {
-                format!("/{}", display_title)
+                format!("/{display_title}")
             } else {
-                format!("{}/{}", path, display_title)
+                format!("{path}/{display_title}")
             };
             let inode = self.get_or_create_inode(&full_path);
             entries.push((inode, FileType::RegularFile, display_title));
         }
-        
+
         // Handle path conflicts - if there are duplicate titles, favor the most recent based on user_updated_time
         let mut seen_titles = std::collections::HashSet::new();
         let mut unique_entries = Vec::new();
-        
+
         for entry in entries {
             if entry.2 == "." || entry.2 == ".." {
                 unique_entries.push(entry);
@@ -568,7 +568,7 @@ impl Filesystem for SqliteFS {
                 unique_entries.push(entry);
             }
         }
-        
+
         for (i, entry) in unique_entries.into_iter().enumerate().skip(offset as usize) {
             if reply.add(entry.0, (i + 1) as i64, entry.1, &entry.2) {
                 break;
@@ -580,7 +580,7 @@ impl Filesystem for SqliteFS {
     /// Handle directory creation operations
     /// This method is called when users create new directories using mkdir().
     /// It creates a new folder record in the database with proper UUID and parent relationships.
-    /// 
+    ///
     /// Key behaviors:
     /// - Generates UUID v4 for the new folder's database ID
     /// - Resolves parent path to parent folder UUID for database foreign key
@@ -617,9 +617,9 @@ impl Filesystem for SqliteFS {
             Ok(_folder_id) => {
                 // Create the full path for the new folder
                 let full_path = if parent_path == "/" {
-                    format!("/{}", folder_name)
+                    format!("/{folder_name}")
                 } else {
-                    format!("{}/{}", parent_path, folder_name)
+                    format!("{parent_path}/{folder_name}")
                 };
 
                 // Create inode for the new folder
@@ -693,9 +693,9 @@ impl Filesystem for SqliteFS {
             Ok(_note_id) => {
                 // Create the full path for the new file
                 let full_path = if parent_path == "/" {
-                    format!("/{}", file_name)
+                    format!("/{file_name}")
                 } else {
-                    format!("{}/{}", parent_path, file_name)
+                    format!("{parent_path}/{file_name}")
                 };
 
                 // Create inode for the new file
@@ -738,7 +738,7 @@ impl Filesystem for SqliteFS {
     /// This method is called when applications write data to open files.
     /// It supports both overwriting (offset 0) and appending/inserting at specific offsets.
     /// The content is immediately written to the database's 'body' field.
-    /// 
+    ///
     /// Key behaviors:
     /// - offset 0: Completely overwrites existing content
     /// - offset > 0: Inserts/appends data at the specified position
@@ -805,12 +805,12 @@ impl Filesystem for SqliteFS {
             // Append or insert at offset
             let mut content_bytes = current_content.into_bytes();
             let start_pos = offset as usize;
-            
+
             if start_pos > content_bytes.len() {
                 // If offset is beyond current content, pad with zeros
                 content_bytes.resize(start_pos, 0);
             }
-            
+
             // Replace or extend content
             if start_pos + data.len() <= content_bytes.len() {
                 // Replace existing content
@@ -820,7 +820,7 @@ impl Filesystem for SqliteFS {
                 content_bytes.truncate(start_pos);
                 content_bytes.extend_from_slice(data);
             }
-            
+
             String::from_utf8_lossy(&content_bytes).to_string()
         };
 
@@ -897,7 +897,7 @@ impl Filesystem for SqliteFS {
     /// This method is called when editors or applications try to set file attributes
     /// such as timestamps, file size, permissions, etc. Many editors require this
     /// operation to function properly.
-    /// 
+    ///
     /// Key behaviors:
     /// - Handles size changes (truncation/extension of file content)
     /// - Updates timestamps in the database when modified
@@ -1017,7 +1017,7 @@ impl Filesystem for SqliteFS {
         let attr = FileAttr {
             ino,
             size: content_size as u64,
-            blocks: ((content_size + 511) / 512) as u64,
+            blocks: content_size.div_ceil(512) as u64,
             atime: UNIX_EPOCH + Duration::from_secs(created_time as u64),
             mtime: UNIX_EPOCH + Duration::from_secs(updated_time as u64),
             ctime: UNIX_EPOCH + Duration::from_secs(updated_time as u64),
@@ -1040,12 +1040,19 @@ impl Filesystem for SqliteFS {
     /// all pending writes have been completed. Since we write directly to the
     /// database in our write() method, this is essentially a no-op, but we
     /// need to implement it for editor compatibility.
-    /// 
+    ///
     /// Key behaviors:
     /// - Always returns success since writes are already persistent
     /// - Required for proper editor functionality (many editors call flush before close)
     /// - Validates that the file handle corresponds to a valid file
-    fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: fuser::ReplyEmpty) {
+    fn flush(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        reply: fuser::ReplyEmpty,
+    ) {
         // Verify that the inode exists (basic validation)
         if self.get_path_from_inode(ino).is_some() {
             // Since we write directly to the database, flush is always successful
@@ -1059,7 +1066,7 @@ impl Filesystem for SqliteFS {
     /// This method is called when a file handle is closed. Since we don't
     /// maintain any file-specific state or resources, this is essentially
     /// a no-op, but it's required for proper FUSE operation.
-    /// 
+    ///
     /// Key behaviors:
     /// - Always returns success since no cleanup is needed
     /// - Called when editors close files or when file handles are released
@@ -1086,7 +1093,7 @@ impl Filesystem for SqliteFS {
     /// Handle file and directory renaming operations
     /// This method is called when a file or directory is renamed (e.g., using mv command).
     /// It updates the database to reflect the new name while preserving all other metadata.
-    /// 
+    ///
     /// Key behaviors:
     /// - Updates the 'title' field in the database for the renamed item
     /// - Handles both files (notes) and directories (folders)
@@ -1111,7 +1118,7 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
-        
+
         let new_name = match newname.to_str() {
             Some(n) => n,
             None => {
@@ -1128,7 +1135,7 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
-        
+
         let new_parent_path = match self.get_path_from_inode(newparent) {
             Some(path) => path.clone(),
             None => {
@@ -1145,7 +1152,7 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
-        
+
         let new_parent_folder_id = match self.get_parent_folder_id(&new_parent_path) {
             Ok(id) => id,
             Err(_) => {
@@ -1162,7 +1169,7 @@ impl Filesystem for SqliteFS {
         // Try to rename as a file first (strip .md suffix for database)
         let old_title = Self::strip_md_suffix(old_name);
         let new_title = Self::strip_md_suffix(new_name);
-        
+
         let file_result = self.db.execute(
             "UPDATE notes SET title = ?1, parent_id = ?2, user_updated_time = ?3 WHERE parent_id = ?4 AND title = ?5 AND deleted_time = 0",
             [new_title, &new_parent_folder_id, &current_time.to_string(), &parent_folder_id, old_title]
@@ -1173,23 +1180,23 @@ impl Filesystem for SqliteFS {
                 // Successfully renamed a file
                 // Update inode mappings
                 let old_path = if parent_path == "/" {
-                    format!("/{}", old_name)
+                    format!("/{old_name}")
                 } else {
-                    format!("{}/{}", parent_path, old_name)
+                    format!("{parent_path}/{old_name}")
                 };
-                
+
                 let new_path = if new_parent_path == "/" {
-                    format!("/{}", new_name)
+                    format!("/{new_name}")
                 } else {
-                    format!("{}/{}", new_parent_path, new_name)
+                    format!("{new_parent_path}/{new_name}")
                 };
-                
+
                 // Update inode mappings
                 if let Some(inode) = self.inode_map.remove(&old_path) {
                     self.inode_map.insert(new_path.clone(), inode);
                     self.reverse_inode_map.insert(inode, new_path);
                 }
-                
+
                 reply.ok();
                 return;
             }
@@ -1206,17 +1213,17 @@ impl Filesystem for SqliteFS {
                 // Successfully renamed a folder
                 // Update inode mappings
                 let old_path = if parent_path == "/" {
-                    format!("/{}", old_name)
+                    format!("/{old_name}")
                 } else {
-                    format!("{}/{}", parent_path, old_name)
+                    format!("{parent_path}/{old_name}")
                 };
-                
+
                 let new_path = if new_parent_path == "/" {
-                    format!("/{}", new_name)
+                    format!("/{new_name}")
                 } else {
-                    format!("{}/{}", new_parent_path, new_name)
+                    format!("{new_parent_path}/{new_name}")
                 };
-                
+
                 // Update inode mappings for the folder and all its descendants
                 let mut paths_to_update = Vec::new();
                 for (path, inode) in &self.inode_map {
@@ -1225,13 +1232,13 @@ impl Filesystem for SqliteFS {
                         paths_to_update.push((path.clone(), new_descendant_path, *inode));
                     }
                 }
-                
+
                 for (old_path, new_path, inode) in paths_to_update {
                     self.inode_map.remove(&old_path);
                     self.inode_map.insert(new_path.clone(), inode);
                     self.reverse_inode_map.insert(inode, new_path);
                 }
-                
+
                 reply.ok();
                 return;
             }
@@ -1244,7 +1251,7 @@ impl Filesystem for SqliteFS {
     /// Handle file deletion operations
     /// This method is called when a file is deleted (e.g., using rm command).
     /// It removes the corresponding row from the notes table in the database.
-    /// 
+    ///
     /// Key behaviors:
     /// - Deletes the most recent row (based on user_updated_time) if duplicates exist
     /// - Strips .md suffix from filename before database lookup
@@ -1288,7 +1295,7 @@ impl Filesystem for SqliteFS {
                 ORDER BY user_updated_time DESC 
                 LIMIT 1
             )",
-            [&parent_folder_id, title]
+            [&parent_folder_id, title],
         );
 
         match result {
@@ -1297,15 +1304,15 @@ impl Filesystem for SqliteFS {
                     // Successfully deleted the file
                     // Remove from inode mappings
                     let file_path = if parent_path == "/" {
-                        format!("/{}", filename)
+                        format!("/{filename}")
                     } else {
-                        format!("{}/{}", parent_path, filename)
+                        format!("{parent_path}/{filename}")
                     };
-                    
+
                     if let Some(inode) = self.inode_map.remove(&file_path) {
                         self.reverse_inode_map.remove(&inode);
                     }
-                    
+
                     reply.ok();
                 } else {
                     // File not found
@@ -1321,7 +1328,7 @@ impl Filesystem for SqliteFS {
     /// Handle directory deletion operations
     /// This method is called when a directory is deleted (e.g., using rmdir command).
     /// It removes the corresponding row from the folders table in the database.
-    /// 
+    ///
     /// Key behaviors:
     /// - Only deletes empty directories (standard rmdir behavior)
     /// - Deletes the most recent row (based on user_updated_time) if duplicates exist
@@ -1361,7 +1368,7 @@ impl Filesystem for SqliteFS {
              ORDER BY user_updated_time DESC 
              LIMIT 1",
             [&parent_folder_id, dirname],
-            |row| row.get(0)
+            |row| row.get(0),
         );
 
         let folder_id = match folder_to_delete_id {
@@ -1376,13 +1383,13 @@ impl Filesystem for SqliteFS {
         let child_folders: Result<i64, rusqlite::Error> = self.db.query_row(
             "SELECT COUNT(*) FROM folders WHERE parent_id = ?1 AND deleted_time = 0",
             [&folder_id],
-            |row| row.get(0)
+            |row| row.get(0),
         );
 
         let child_notes: Result<i64, rusqlite::Error> = self.db.query_row(
             "SELECT COUNT(*) FROM notes WHERE parent_id = ?1 AND deleted_time = 0",
             [&folder_id],
-            |row| row.get(0)
+            |row| row.get(0),
         );
 
         match (child_folders, child_notes) {
@@ -1400,10 +1407,9 @@ impl Filesystem for SqliteFS {
         }
 
         // Directory is empty, proceed with deletion
-        let result = self.db.execute(
-            "DELETE FROM folders WHERE id = ?1",
-            [&folder_id]
-        );
+        let result = self
+            .db
+            .execute("DELETE FROM folders WHERE id = ?1", [&folder_id]);
 
         match result {
             Ok(rows_affected) => {
@@ -1411,15 +1417,15 @@ impl Filesystem for SqliteFS {
                     // Successfully deleted the directory
                     // Remove from inode mappings
                     let dir_path = if parent_path == "/" {
-                        format!("/{}", dirname)
+                        format!("/{dirname}")
                     } else {
-                        format!("{}/{}", parent_path, dirname)
+                        format!("{parent_path}/{dirname}")
                     };
-                    
+
                     if let Some(inode) = self.inode_map.remove(&dir_path) {
                         self.reverse_inode_map.remove(&inode);
                     }
-                    
+
                     reply.ok();
                 } else {
                     // Should not happen since we just queried for it
@@ -1462,18 +1468,18 @@ fn main() {
         )
         .get_matches();
     env_logger::init();
-    
+
     let database_path = matches.get_one::<String>("DATABASE").unwrap();
     let mountpoint = matches.get_one::<String>("MOUNT_POINT").unwrap();
-    
+
     let fs = match SqliteFS::new(database_path) {
         Ok(fs) => fs,
         Err(e) => {
-            eprintln!("Failed to open database: {}", e);
+            eprintln!("Failed to open database: {e}");
             std::process::exit(1);
         }
     };
-    
+
     let mut options = vec![MountOption::FSName("sqlite_fuse".to_string())];
     if matches.get_flag("auto_unmount") {
         options.push(MountOption::AutoUnmount);
@@ -1483,4 +1489,3 @@ fn main() {
     }
     fuser::mount2(fs, mountpoint, &options).unwrap();
 }
-
