@@ -52,6 +52,34 @@ impl SqliteFS {
         self.reverse_inode_map.get(&inode)
     }
     
+    fn get_parent_folder_id(&self, parent_path: &str) -> Result<String> {
+        if parent_path == "/" {
+            // Root directory - empty parent_id
+            return Ok("".to_string());
+        }
+        
+        // Split the path and find the folder ID by walking through the hierarchy
+        let path_parts: Vec<&str> = parent_path.trim_start_matches('/').split('/').collect();
+        let mut current_parent_id = "".to_string();
+        
+        for part in path_parts {
+            if part.is_empty() {
+                continue;
+            }
+            
+            // Find the folder with this title under current_parent_id
+            let folder_id: String = self.db.query_row(
+                "SELECT id FROM folders WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
+                [&current_parent_id, part],
+                |row| row.get(0)
+            )?;
+            
+            current_parent_id = folder_id;
+        }
+        
+        Ok(current_parent_id)
+    }
+    
 }
 
 impl Filesystem for SqliteFS {
@@ -84,14 +112,17 @@ impl Filesystem for SqliteFS {
         let folder_query = "SELECT id, title, created_time, updated_time, user_updated_time FROM folders WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
         
         let folder_result = {
-            if let Ok(mut stmt) = self.db.prepare(folder_query) {
-                let parent_id = if parent == 1 { "" } else { &parent_path[1..] }; // Remove leading slash for parent_id
-                stmt.query_row([parent_id, name_str], |row| {
-                    let id: String = row.get(0)?;
-                    let created_time: i64 = row.get(2)?;
-                    let updated_time: i64 = row.get(3)?;
-                    Ok((id, created_time, updated_time))
-                }).ok()
+            if let Ok(parent_folder_id) = self.get_parent_folder_id(&parent_path) {
+                if let Ok(mut stmt) = self.db.prepare(folder_query) {
+                    stmt.query_row([&parent_folder_id, name_str], |row| {
+                        let id: String = row.get(0)?;
+                        let created_time: i64 = row.get(2)?;
+                        let updated_time: i64 = row.get(3)?;
+                        Ok((id, created_time, updated_time))
+                    }).ok()
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -124,15 +155,18 @@ impl Filesystem for SqliteFS {
         let note_query = "SELECT id, title, body, created_time, updated_time, user_updated_time FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
         
         let note_result = {
-            if let Ok(mut stmt) = self.db.prepare(note_query) {
-                let parent_id = if parent == 1 { "" } else { &parent_path[1..] }; // Remove leading slash for parent_id
-                stmt.query_row([parent_id, name_str], |row| {
-                    let id: String = row.get(0)?;
-                    let body: String = row.get(2)?;
-                    let created_time: i64 = row.get(3)?;
-                    let updated_time: i64 = row.get(4)?;
-                    Ok((id, body, created_time, updated_time))
-                }).ok()
+            if let Ok(parent_folder_id) = self.get_parent_folder_id(&parent_path) {
+                if let Ok(mut stmt) = self.db.prepare(note_query) {
+                    stmt.query_row([&parent_folder_id, name_str], |row| {
+                        let id: String = row.get(0)?;
+                        let body: String = row.get(2)?;
+                        let created_time: i64 = row.get(3)?;
+                        let updated_time: i64 = row.get(4)?;
+                        Ok((id, body, created_time, updated_time))
+                    }).ok()
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -208,65 +242,67 @@ impl Filesystem for SqliteFS {
         // Query database for folders first
         let folder_query = "SELECT id, title, created_time, updated_time, user_updated_time FROM folders WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
         
-        if let Ok(mut stmt) = self.db.prepare(folder_query) {
-            let parent_id = if parent_path == "/" { "" } else { &parent_path[1..] };
-            if let Ok(folder_row) = stmt.query_row([parent_id, filename], |row| {
-                let created_time: i64 = row.get(2)?;
-                let updated_time: i64 = row.get(3)?;
-                Ok((created_time, updated_time))
-            }) {
-                let attr = FileAttr {
-                    ino,
-                    size: 0,
-                    blocks: 0,
-                    atime: UNIX_EPOCH + Duration::from_secs(folder_row.0 as u64),
-                    mtime: UNIX_EPOCH + Duration::from_secs(folder_row.1 as u64),
-                    ctime: UNIX_EPOCH + Duration::from_secs(folder_row.1 as u64),
-                    crtime: UNIX_EPOCH + Duration::from_secs(folder_row.0 as u64),
-                    kind: FileType::Directory,
-                    perm: 0o755,
-                    nlink: 2,
-                    uid: 501,
-                    gid: 20,
-                    rdev: 0,
-                    flags: 0,
-                    blksize: 512,
-                };
-                reply.attr(&TTL, &attr);
-                return;
+        if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
+            if let Ok(mut stmt) = self.db.prepare(folder_query) {
+                if let Ok(folder_row) = stmt.query_row([&parent_folder_id, filename], |row| {
+                    let created_time: i64 = row.get(2)?;
+                    let updated_time: i64 = row.get(3)?;
+                    Ok((created_time, updated_time))
+                }) {
+                    let attr = FileAttr {
+                        ino,
+                        size: 0,
+                        blocks: 0,
+                        atime: UNIX_EPOCH + Duration::from_secs(folder_row.0 as u64),
+                        mtime: UNIX_EPOCH + Duration::from_secs(folder_row.1 as u64),
+                        ctime: UNIX_EPOCH + Duration::from_secs(folder_row.1 as u64),
+                        crtime: UNIX_EPOCH + Duration::from_secs(folder_row.0 as u64),
+                        kind: FileType::Directory,
+                        perm: 0o755,
+                        nlink: 2,
+                        uid: 501,
+                        gid: 20,
+                        rdev: 0,
+                        flags: 0,
+                        blksize: 512,
+                    };
+                    reply.attr(&TTL, &attr);
+                    return;
+                }
             }
         }
         
         // Query database for notes
         let note_query = "SELECT id, title, body, created_time, updated_time, user_updated_time FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
         
-        if let Ok(mut stmt) = self.db.prepare(note_query) {
-            let parent_id = if parent_path == "/" { "" } else { &parent_path[1..] };
-            if let Ok(note_row) = stmt.query_row([parent_id, filename], |row| {
-                let body: String = row.get(2)?;
-                let created_time: i64 = row.get(3)?;
-                let updated_time: i64 = row.get(4)?;
-                Ok((body, created_time, updated_time))
-            }) {
-                let attr = FileAttr {
-                    ino,
-                    size: note_row.0.len() as u64,
-                    blocks: ((note_row.0.len() + 511) / 512) as u64,
-                    atime: UNIX_EPOCH + Duration::from_secs(note_row.1 as u64),
-                    mtime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
-                    ctime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
-                    crtime: UNIX_EPOCH + Duration::from_secs(note_row.1 as u64),
-                    kind: FileType::RegularFile,
-                    perm: 0o644,
-                    nlink: 1,
-                    uid: 501,
-                    gid: 20,
-                    rdev: 0,
-                    flags: 0,
-                    blksize: 512,
-                };
-                reply.attr(&TTL, &attr);
-                return;
+        if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
+            if let Ok(mut stmt) = self.db.prepare(note_query) {
+                if let Ok(note_row) = stmt.query_row([&parent_folder_id, filename], |row| {
+                    let body: String = row.get(2)?;
+                    let created_time: i64 = row.get(3)?;
+                    let updated_time: i64 = row.get(4)?;
+                    Ok((body, created_time, updated_time))
+                }) {
+                    let attr = FileAttr {
+                        ino,
+                        size: note_row.0.len() as u64,
+                        blocks: ((note_row.0.len() + 511) / 512) as u64,
+                        atime: UNIX_EPOCH + Duration::from_secs(note_row.1 as u64),
+                        mtime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
+                        ctime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
+                        crtime: UNIX_EPOCH + Duration::from_secs(note_row.1 as u64),
+                        kind: FileType::RegularFile,
+                        perm: 0o644,
+                        nlink: 1,
+                        uid: 501,
+                        gid: 20,
+                        rdev: 0,
+                        flags: 0,
+                        blksize: 512,
+                    };
+                    reply.attr(&TTL, &attr);
+                    return;
+                }
             }
         }
         
@@ -304,20 +340,21 @@ impl Filesystem for SqliteFS {
         // Query database for the note content
         let note_query = "SELECT body FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
         
-        if let Ok(mut stmt) = self.db.prepare(note_query) {
-            let parent_id = if parent_path == "/" { "" } else { &parent_path[1..] };
-            if let Ok(body) = stmt.query_row([parent_id, filename], |row| {
-                let body: String = row.get(0)?;
-                Ok(body)
-            }) {
-                let content = body.as_bytes();
-                let start = offset as usize;
-                if start < content.len() {
-                    reply.data(&content[start..]);
-                } else {
-                    reply.data(&[]);
+        if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
+            if let Ok(mut stmt) = self.db.prepare(note_query) {
+                if let Ok(body) = stmt.query_row([&parent_folder_id, filename], |row| {
+                    let body: String = row.get(0)?;
+                    Ok(body)
+                }) {
+                    let content = body.as_bytes();
+                    let start = offset as usize;
+                    if start < content.len() {
+                        reply.data(&content[start..]);
+                    } else {
+                        reply.data(&[]);
+                    }
+                    return;
                 }
-                return;
             }
         }
         
@@ -340,18 +377,25 @@ impl Filesystem for SqliteFS {
             }
         };
         
-        let parent_id = if path == "/" { "" } else { &path[1..] };
-        
         let mut entries = vec![
             (ino, FileType::Directory, ".".to_string()),
             (1, FileType::Directory, "..".to_string()),
         ];
         
+        // Get the parent folder ID for this directory
+        let parent_folder_id = match self.get_parent_folder_id(&path) {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        
         // Query folders
         let folder_query = "SELECT id, title FROM folders WHERE parent_id = ?1 AND deleted_time = 0 ORDER BY user_updated_time DESC";
         let folder_titles = {
             if let Ok(mut stmt) = self.db.prepare(folder_query) {
-                if let Ok(rows) = stmt.query_map([parent_id], |row| {
+                if let Ok(rows) = stmt.query_map([&parent_folder_id], |row| {
                     let title: String = row.get(1)?;
                     Ok(title)
                 }) {
@@ -384,7 +428,7 @@ impl Filesystem for SqliteFS {
         let note_query = "SELECT id, title FROM notes WHERE parent_id = ?1 AND deleted_time = 0 ORDER BY user_updated_time DESC";
         let note_titles = {
             if let Ok(mut stmt) = self.db.prepare(note_query) {
-                if let Ok(rows) = stmt.query_map([parent_id], |row| {
+                if let Ok(rows) = stmt.query_map([&parent_folder_id], |row| {
                     let title: String = row.get(1)?;
                     Ok(title)
                 }) {
@@ -882,6 +926,80 @@ mod tests {
         println!("- Deep path resolution: ✓");
         println!("- Content retrieval at all levels: ✓");
         println!("- Parallel branches: ✓");
+    }
+
+    #[test]
+    fn test_parent_folder_id_resolution() {
+        let conn = create_deep_hierarchy_db().expect("Failed to create test database");
+        let fs = SqliteFS {
+            db: conn,
+            inode_map: std::collections::HashMap::new(),
+            reverse_inode_map: std::collections::HashMap::new(),
+            next_inode: 2,
+        };
+        
+        // Test root directory
+        let root_id = fs.get_parent_folder_id("/").unwrap();
+        assert_eq!(root_id, "");
+        println!("✓ Root directory resolves to empty parent_id");
+        
+        // Test level 1 path
+        let projects_id = fs.get_parent_folder_id("/Projects").unwrap();
+        assert_eq!(projects_id, "projects");
+        println!("✓ /Projects resolves to 'projects' UUID");
+        
+        // Test level 2 path
+        let rust_project_id = fs.get_parent_folder_id("/Projects/RustProject").unwrap();
+        assert_eq!(rust_project_id, "rust_project");
+        println!("✓ /Projects/RustProject resolves to 'rust_project' UUID");
+        
+        // Test level 3 path
+        let src_id = fs.get_parent_folder_id("/Projects/RustProject/src").unwrap();
+        assert_eq!(src_id, "rust_src");
+        println!("✓ /Projects/RustProject/src resolves to 'rust_src' UUID");
+        
+        // Test that we can find items at each level using the resolved parent IDs
+        
+        // Root level check
+        let root_folder_count: i64 = fs.db.query_row(
+            "SELECT COUNT(*) FROM folders WHERE parent_id = ?1 AND deleted_time = 0",
+            [&root_id],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(root_folder_count, 1);
+        println!("✓ Found {} folder in root using resolved parent_id", root_folder_count);
+        
+        // Projects level check
+        let projects_folder_count: i64 = fs.db.query_row(
+            "SELECT COUNT(*) FROM folders WHERE parent_id = ?1 AND deleted_time = 0",
+            [&projects_id],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(projects_folder_count, 2); // RustProject and PythonProject
+        println!("✓ Found {} folders in Projects using resolved parent_id", projects_folder_count);
+        
+        // RustProject level check
+        let rust_folder_count: i64 = fs.db.query_row(
+            "SELECT COUNT(*) FROM folders WHERE parent_id = ?1 AND deleted_time = 0",
+            [&rust_project_id],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(rust_folder_count, 2); // src and tests
+        println!("✓ Found {} folders in RustProject using resolved parent_id", rust_folder_count);
+        
+        // src level check
+        let src_note_count: i64 = fs.db.query_row(
+            "SELECT COUNT(*) FROM notes WHERE parent_id = ?1 AND deleted_time = 0",
+            [&src_id],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(src_note_count, 2); // main.rs and lib.rs
+        println!("✓ Found {} files in src using resolved parent_id", src_note_count);
+        
+        println!("\\n🎉 Parent folder ID resolution test passed!");
+        println!("- UUID-based parent resolution: ✓");
+        println!("- Multi-level path walking: ✓");
+        println!("- Database relationship validation: ✓");
     }
 
 }
