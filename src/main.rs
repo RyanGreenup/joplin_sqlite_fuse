@@ -1082,6 +1082,164 @@ impl Filesystem for SqliteFS {
             reply.error(ENOENT);
         }
     }
+
+    /// Handle file and directory renaming operations
+    /// This method is called when a file or directory is renamed (e.g., using mv command).
+    /// It updates the database to reflect the new name while preserving all other metadata.
+    /// 
+    /// Key behaviors:
+    /// - Updates the 'title' field in the database for the renamed item
+    /// - Handles both files (notes) and directories (folders)
+    /// - Strips .md suffix from filenames before storing in database
+    /// - Updates the user_updated_time timestamp
+    /// - Maintains proper parent-child relationships
+    /// - Required for proper file manager and shell integration
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let old_name = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+        
+        let new_name = match newname.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent paths
+        let parent_path = match self.get_path_from_inode(parent) {
+            Some(path) => path.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        
+        let new_parent_path = match self.get_path_from_inode(newparent) {
+            Some(path) => path.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Get parent folder IDs from database
+        let parent_folder_id = match self.get_parent_folder_id(&parent_path) {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        
+        let new_parent_folder_id = match self.get_parent_folder_id(&new_parent_path) {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Try to rename as a file first (strip .md suffix for database)
+        let old_title = Self::strip_md_suffix(old_name);
+        let new_title = Self::strip_md_suffix(new_name);
+        
+        let file_result = self.db.execute(
+            "UPDATE notes SET title = ?1, parent_id = ?2, user_updated_time = ?3 WHERE parent_id = ?4 AND title = ?5 AND deleted_time = 0",
+            [new_title, &new_parent_folder_id, &current_time.to_string(), &parent_folder_id, old_title]
+        );
+
+        if let Ok(rows_affected) = file_result {
+            if rows_affected > 0 {
+                // Successfully renamed a file
+                // Update inode mappings
+                let old_path = if parent_path == "/" {
+                    format!("/{}", old_name)
+                } else {
+                    format!("{}/{}", parent_path, old_name)
+                };
+                
+                let new_path = if new_parent_path == "/" {
+                    format!("/{}", new_name)
+                } else {
+                    format!("{}/{}", new_parent_path, new_name)
+                };
+                
+                // Update inode mappings
+                if let Some(inode) = self.inode_map.remove(&old_path) {
+                    self.inode_map.insert(new_path.clone(), inode);
+                    self.reverse_inode_map.insert(inode, new_path);
+                }
+                
+                reply.ok();
+                return;
+            }
+        }
+
+        // Try to rename as a folder
+        let folder_result = self.db.execute(
+            "UPDATE folders SET title = ?1, parent_id = ?2, user_updated_time = ?3 WHERE parent_id = ?4 AND title = ?5 AND deleted_time = 0",
+            [new_name, &new_parent_folder_id, &current_time.to_string(), &parent_folder_id, old_name]
+        );
+
+        if let Ok(rows_affected) = folder_result {
+            if rows_affected > 0 {
+                // Successfully renamed a folder
+                // Update inode mappings
+                let old_path = if parent_path == "/" {
+                    format!("/{}", old_name)
+                } else {
+                    format!("{}/{}", parent_path, old_name)
+                };
+                
+                let new_path = if new_parent_path == "/" {
+                    format!("/{}", new_name)
+                } else {
+                    format!("{}/{}", new_parent_path, new_name)
+                };
+                
+                // Update inode mappings for the folder and all its descendants
+                let mut paths_to_update = Vec::new();
+                for (path, inode) in &self.inode_map {
+                    if path.starts_with(&old_path) {
+                        let new_descendant_path = path.replacen(&old_path, &new_path, 1);
+                        paths_to_update.push((path.clone(), new_descendant_path, *inode));
+                    }
+                }
+                
+                for (old_path, new_path, inode) in paths_to_update {
+                    self.inode_map.remove(&old_path);
+                    self.inode_map.insert(new_path.clone(), inode);
+                    self.reverse_inode_map.insert(inode, new_path);
+                }
+                
+                reply.ok();
+                return;
+            }
+        }
+
+        // Neither file nor folder was found
+        reply.error(ENOENT);
+    }
 }
 
 fn main() {

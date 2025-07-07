@@ -30,7 +30,7 @@ The user cares primarily with:
     - [X] Reading the contents of a file (e.g. `cat`)
 3. Update
     - [X] Changing the content of a note (to change the `body`)
-    - [ ] Renaming Files (to change the `title`)
+    - [X] Renaming Files (to change the `title`)
     - [ ] Renaming Folders (to change the `title`)
     - [ ] Moving Folders and all children recursively (e.g. `mv`)
     - [ ] Moving Files
