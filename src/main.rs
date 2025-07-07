@@ -17,21 +17,46 @@ struct SqliteFS {
     inode_map: HashMap<String, u64>,
     reverse_inode_map: HashMap<u64, String>,
     next_inode: u64,
+    // Performance caches
+    path_to_folder_id_cache: HashMap<String, String>,
 }
 
 impl SqliteFS {
     fn new(db_path: &str) -> Result<Self> {
         let db = Connection::open(db_path)?;
+        
+        // Create performance indexes if they don't exist
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_folders_parent_title ON folders(parent_id, title) WHERE deleted_time = 0",
+            [],
+        )?;
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notes_parent_title ON notes(parent_id, title) WHERE deleted_time = 0",
+            [],
+        )?;
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_folders_parent_updated ON folders(parent_id, user_updated_time) WHERE deleted_time = 0",
+            [],
+        )?;
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notes_parent_updated ON notes(parent_id, user_updated_time) WHERE deleted_time = 0",
+            [],
+        )?;
+        
         let mut fs = SqliteFS {
             db,
             inode_map: HashMap::new(),
             reverse_inode_map: HashMap::new(),
             next_inode: 2,
+            path_to_folder_id_cache: HashMap::new(),
         };
 
         // Root directory gets inode 1
         fs.inode_map.insert("/".to_string(), 1);
         fs.reverse_inode_map.insert(1, "/".to_string());
+        
+        // Cache root folder ID
+        fs.path_to_folder_id_cache.insert("/".to_string(), "".to_string());
 
         Ok(fs)
     }
@@ -52,18 +77,36 @@ impl SqliteFS {
         self.reverse_inode_map.get(&inode)
     }
 
-    fn get_parent_folder_id(&self, parent_path: &str) -> Result<String> {
+    fn get_parent_folder_id(&mut self, parent_path: &str) -> Result<String> {
         if parent_path == "/" {
             // Root directory - empty parent_id
             return Ok("".to_string());
         }
 
+        // Check cache first
+        if let Some(cached_id) = self.path_to_folder_id_cache.get(parent_path) {
+            return Ok(cached_id.clone());
+        }
+
         // Split the path and find the folder ID by walking through the hierarchy
         let path_parts: Vec<&str> = parent_path.trim_start_matches('/').split('/').collect();
         let mut current_parent_id = "".to_string();
+        let mut current_path = String::new();
 
         for part in path_parts {
             if part.is_empty() {
+                continue;
+            }
+
+            current_path = if current_path.is_empty() {
+                format!("/{}", part)
+            } else {
+                format!("{}/{}", current_path, part)
+            };
+
+            // Check if we already have this path cached
+            if let Some(cached_id) = self.path_to_folder_id_cache.get(&current_path) {
+                current_parent_id = cached_id.clone();
                 continue;
             }
 
@@ -74,6 +117,8 @@ impl SqliteFS {
                 |row| row.get(0)
             )?;
 
+            // Cache this path -> folder_id mapping
+            self.path_to_folder_id_cache.insert(current_path.clone(), folder_id.clone());
             current_parent_id = folder_id;
         }
 
@@ -95,6 +140,19 @@ impl SqliteFS {
     /// Generate a UUID v4 string for database record IDs
     fn generate_uuid() -> String {
         Uuid::new_v4().to_string()
+    }
+    
+    /// Clear cache entries that may be affected by path changes
+    fn invalidate_path_cache(&mut self, path: &str) {
+        let mut keys_to_remove = Vec::new();
+        for key in self.path_to_folder_id_cache.keys() {
+            if key.starts_with(path) {
+                keys_to_remove.push(key.clone());
+            }
+        }
+        for key in keys_to_remove {
+            self.path_to_folder_id_cache.remove(&key);
+        }
     }
 
     /// Create a new folder in the database
@@ -127,6 +185,14 @@ impl SqliteFS {
             "INSERT INTO folders (id, title, created_time, updated_time, user_created_time, user_updated_time, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             [&folder_id, folder_name, &now.to_string(), &now.to_string(), &now.to_string(), &now.to_string(), &parent_folder_id],
         )?;
+        
+        // Cache the new folder path -> id mapping
+        let new_folder_path = if parent_path == "/" {
+            format!("/{}", folder_name)
+        } else {
+            format!("{}/{}", parent_path, folder_name)
+        };
+        self.path_to_folder_id_cache.insert(new_folder_path, folder_id.clone());
 
         Ok(folder_id)
     }
@@ -1196,6 +1262,10 @@ impl Filesystem for SqliteFS {
                     self.inode_map.insert(new_path.clone(), inode);
                     self.reverse_inode_map.insert(inode, new_path);
                 }
+                
+                // Invalidate cache for moved file's parent paths
+                self.invalidate_path_cache(&parent_path);
+                self.invalidate_path_cache(&new_parent_path);
 
                 reply.ok();
                 return;
@@ -1238,6 +1308,10 @@ impl Filesystem for SqliteFS {
                     self.inode_map.insert(new_path.clone(), inode);
                     self.reverse_inode_map.insert(inode, new_path);
                 }
+                
+                // Invalidate cache for moved folder and all its descendants
+                self.invalidate_path_cache(&old_path);
+                self.invalidate_path_cache(&new_path);
 
                 reply.ok();
                 return;
@@ -1312,6 +1386,9 @@ impl Filesystem for SqliteFS {
                     if let Some(inode) = self.inode_map.remove(&file_path) {
                         self.reverse_inode_map.remove(&inode);
                     }
+                    
+                    // Invalidate cache for deleted file's parent path
+                    self.invalidate_path_cache(&parent_path);
 
                     reply.ok();
                 } else {
@@ -1425,6 +1502,10 @@ impl Filesystem for SqliteFS {
                     if let Some(inode) = self.inode_map.remove(&dir_path) {
                         self.reverse_inode_map.remove(&inode);
                     }
+                    
+                    // Invalidate cache for deleted folder and its parent
+                    self.invalidate_path_cache(&dir_path);
+                    self.invalidate_path_cache(&parent_path);
 
                     reply.ok();
                 } else {
