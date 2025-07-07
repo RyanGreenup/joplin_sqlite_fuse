@@ -1240,6 +1240,197 @@ impl Filesystem for SqliteFS {
         // Neither file nor folder was found
         reply.error(ENOENT);
     }
+
+    /// Handle file deletion operations
+    /// This method is called when a file is deleted (e.g., using rm command).
+    /// It removes the corresponding row from the notes table in the database.
+    /// 
+    /// Key behaviors:
+    /// - Deletes the most recent row (based on user_updated_time) if duplicates exist
+    /// - Strips .md suffix from filename before database lookup
+    /// - Updates inode mappings to reflect the deletion
+    /// - Required for proper file manager and shell integration
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let filename = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent path
+        let parent_path = match self.get_path_from_inode(parent) {
+            Some(path) => path.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Get parent folder ID from database
+        let parent_folder_id = match self.get_parent_folder_id(&parent_path) {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Strip .md suffix for database lookup
+        let title = Self::strip_md_suffix(filename);
+
+        // Delete the note with the most recent user_updated_time
+        let result = self.db.execute(
+            "DELETE FROM notes WHERE id = (
+                SELECT id FROM notes 
+                WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 
+                ORDER BY user_updated_time DESC 
+                LIMIT 1
+            )",
+            [&parent_folder_id, title]
+        );
+
+        match result {
+            Ok(rows_affected) => {
+                if rows_affected > 0 {
+                    // Successfully deleted the file
+                    // Remove from inode mappings
+                    let file_path = if parent_path == "/" {
+                        format!("/{}", filename)
+                    } else {
+                        format!("{}/{}", parent_path, filename)
+                    };
+                    
+                    if let Some(inode) = self.inode_map.remove(&file_path) {
+                        self.reverse_inode_map.remove(&inode);
+                    }
+                    
+                    reply.ok();
+                } else {
+                    // File not found
+                    reply.error(ENOENT);
+                }
+            }
+            Err(_) => {
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Handle directory deletion operations
+    /// This method is called when a directory is deleted (e.g., using rmdir command).
+    /// It removes the corresponding row from the folders table in the database.
+    /// 
+    /// Key behaviors:
+    /// - Only deletes empty directories (standard rmdir behavior)
+    /// - Deletes the most recent row (based on user_updated_time) if duplicates exist
+    /// - Updates inode mappings to reflect the deletion
+    /// - Required for proper file manager and shell integration
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
+        let dirname = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent path
+        let parent_path = match self.get_path_from_inode(parent) {
+            Some(path) => path.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Get parent folder ID from database
+        let parent_folder_id = match self.get_parent_folder_id(&parent_path) {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // First, get the folder ID that we want to delete
+        let folder_to_delete_id: Result<String, rusqlite::Error> = self.db.query_row(
+            "SELECT id FROM folders 
+             WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 
+             ORDER BY user_updated_time DESC 
+             LIMIT 1",
+            [&parent_folder_id, dirname],
+            |row| row.get(0)
+        );
+
+        let folder_id = match folder_to_delete_id {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Check if the directory is empty (no child folders or notes)
+        let child_folders: Result<i64, rusqlite::Error> = self.db.query_row(
+            "SELECT COUNT(*) FROM folders WHERE parent_id = ?1 AND deleted_time = 0",
+            [&folder_id],
+            |row| row.get(0)
+        );
+
+        let child_notes: Result<i64, rusqlite::Error> = self.db.query_row(
+            "SELECT COUNT(*) FROM notes WHERE parent_id = ?1 AND deleted_time = 0",
+            [&folder_id],
+            |row| row.get(0)
+        );
+
+        match (child_folders, child_notes) {
+            (Ok(folder_count), Ok(note_count)) => {
+                if folder_count > 0 || note_count > 0 {
+                    // Directory is not empty
+                    reply.error(libc::ENOTEMPTY);
+                    return;
+                }
+            }
+            _ => {
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        // Directory is empty, proceed with deletion
+        let result = self.db.execute(
+            "DELETE FROM folders WHERE id = ?1",
+            [&folder_id]
+        );
+
+        match result {
+            Ok(rows_affected) => {
+                if rows_affected > 0 {
+                    // Successfully deleted the directory
+                    // Remove from inode mappings
+                    let dir_path = if parent_path == "/" {
+                        format!("/{}", dirname)
+                    } else {
+                        format!("{}/{}", parent_path, dirname)
+                    };
+                    
+                    if let Some(inode) = self.inode_map.remove(&dir_path) {
+                        self.reverse_inode_map.remove(&inode);
+                    }
+                    
+                    reply.ok();
+                } else {
+                    // Should not happen since we just queried for it
+                    reply.error(ENOENT);
+                }
+            }
+            Err(_) => {
+                reply.error(libc::EIO);
+            }
+        }
+    }
 }
 
 fn main() {
