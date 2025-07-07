@@ -23,8 +23,8 @@ For testing purposes the ./database.sqlite file may be used.
 The user cares primarily with:
 
 1. Creating
-    - [ ] Folders
-    - [ ] Files
+    - [X] Folders
+    - [x] Files
 2. Read
     - [X] Listing Content under Directories
     - [X] Reading the contents of a file (e.g. `cat`)

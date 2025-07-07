@@ -119,6 +119,31 @@ impl SqliteFS {
         Ok(folder_id)
     }
     
+    fn create_note(&mut self, parent_path: &str, file_name: &str, content: &str) -> Result<String> {
+        // Get the parent folder ID
+        let parent_folder_id = self.get_parent_folder_id(parent_path)?;
+        
+        // Strip .md suffix from filename for database storage
+        let note_title = Self::strip_md_suffix(file_name);
+        
+        // Generate new UUID for the note
+        let note_id = Self::generate_uuid();
+        
+        // Get current timestamp
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        
+        // Insert new note into database
+        self.db.execute(
+            "INSERT INTO notes (id, title, body, created_time, updated_time, user_created_time, user_updated_time, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            [&note_id, note_title, content, &now.to_string(), &now.to_string(), &now.to_string(), &now.to_string(), &parent_folder_id],
+        )?;
+        
+        Ok(note_id)
+    }
+    
 }
 
 impl Filesystem for SqliteFS {
@@ -326,10 +351,11 @@ impl Filesystem for SqliteFS {
                     let updated_time: i64 = row.get(4)?;
                     Ok((body, created_time, updated_time))
                 }) {
+                    let content_size = note_row.0.len();
                     let attr = FileAttr {
                         ino,
-                        size: note_row.0.len() as u64,
-                        blocks: ((note_row.0.len() + 511) / 512) as u64,
+                        size: content_size as u64,
+                        blocks: ((content_size + 511) / 512) as u64,
                         atime: UNIX_EPOCH + Duration::from_secs(note_row.1 as u64),
                         mtime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
                         ctime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
@@ -589,6 +615,178 @@ impl Filesystem for SqliteFS {
                 };
 
                 reply.entry(&TTL, &attr, 0);
+            }
+            Err(_) => {
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: fuser::ReplyCreate,
+    ) {
+        let file_name = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent path
+        let parent_path = match self.get_path_from_inode(parent) {
+            Some(path) => path.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Create the note in the database with empty content initially
+        match self.create_note(&parent_path, file_name, "") {
+            Ok(_note_id) => {
+                // Create the full path for the new file
+                let full_path = if parent_path == "/" {
+                    format!("/{}", file_name)
+                } else {
+                    format!("{}/{}", parent_path, file_name)
+                };
+
+                // Create inode for the new file
+                let inode = self.get_or_create_inode(&full_path);
+
+                // Get current timestamp for attributes
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+
+                let attr = FileAttr {
+                    ino: inode,
+                    size: 0, // Empty file initially
+                    blocks: 0,
+                    atime: UNIX_EPOCH + Duration::from_secs(now),
+                    mtime: UNIX_EPOCH + Duration::from_secs(now),
+                    ctime: UNIX_EPOCH + Duration::from_secs(now),
+                    crtime: UNIX_EPOCH + Duration::from_secs(now),
+                    kind: FileType::RegularFile,
+                    perm: 0o644,
+                    nlink: 1,
+                    uid: 501,
+                    gid: 20,
+                    rdev: 0,
+                    flags: 0,
+                    blksize: 512,
+                };
+
+                // Return the created file with a file handle (using inode as fh)
+                reply.created(&TTL, &attr, 0, inode, 0);
+            }
+            Err(_) => {
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyWrite,
+    ) {
+        let path = match self.get_path_from_inode(ino) {
+            Some(path) => path.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Extract the filename and parent path
+        let (parent_path, filename) = if let Some(pos) = path.rfind('/') {
+            let parent = &path[..pos];
+            let name = &path[pos + 1..];
+            (if parent.is_empty() { "/" } else { parent }, name)
+        } else {
+            ("/", &path[..])
+        };
+
+        // Get the parent folder ID and strip .md suffix for database lookup
+        let parent_folder_id = match self.get_parent_folder_id(parent_path) {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let db_title = Self::strip_md_suffix(filename);
+
+        // Get the current content of the note
+        let current_content = match self.db.query_row(
+            "SELECT body FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
+            [&parent_folder_id, db_title],
+            |row| row.get::<_, String>(0)
+        ) {
+            Ok(content) => content,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Handle the write operation
+        let new_content = if offset == 0 {
+            // Overwrite from the beginning
+            String::from_utf8_lossy(data).to_string()
+        } else {
+            // Append or insert at offset
+            let mut content_bytes = current_content.into_bytes();
+            let start_pos = offset as usize;
+            
+            if start_pos > content_bytes.len() {
+                // If offset is beyond current content, pad with zeros
+                content_bytes.resize(start_pos, 0);
+            }
+            
+            // Replace or extend content
+            if start_pos + data.len() <= content_bytes.len() {
+                // Replace existing content
+                content_bytes[start_pos..start_pos + data.len()].copy_from_slice(data);
+            } else {
+                // Extend content
+                content_bytes.truncate(start_pos);
+                content_bytes.extend_from_slice(data);
+            }
+            
+            String::from_utf8_lossy(&content_bytes).to_string()
+        };
+
+        // Update the note in the database
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        match self.db.execute(
+            "UPDATE notes SET body = ?1, updated_time = ?2, user_updated_time = ?3 WHERE parent_id = ?4 AND title = ?5 AND deleted_time = 0",
+            [&new_content, &now.to_string(), &now.to_string(), &parent_folder_id, db_title],
+        ) {
+            Ok(_) => {
+                reply.written(data.len() as u32);
             }
             Err(_) => {
                 reply.error(libc::EIO);
