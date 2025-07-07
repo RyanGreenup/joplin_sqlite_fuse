@@ -485,3 +485,131 @@ fn main() {
     }
     fuser::mount2(fs, mountpoint, &options).unwrap();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn create_test_db() -> rusqlite::Result<Connection> {
+        let conn = Connection::open(":memory:")?;
+        
+        // Create tables
+        conn.execute(
+            "CREATE TABLE `notes`(`id` TEXT PRIMARY KEY,`parent_id` TEXT NOT NULL DEFAULT \"\",`title` TEXT NOT NULL DEFAULT \"\",`body` TEXT NOT NULL DEFAULT \"\",`created_time` INT NOT NULL,`updated_time` INT NOT NULL,`is_conflict` INT NOT NULL DEFAULT 0,`latitude` NUMERIC NOT NULL DEFAULT 0,`longitude` NUMERIC NOT NULL DEFAULT 0,`altitude` NUMERIC NOT NULL DEFAULT 0,`author` TEXT NOT NULL DEFAULT \"\",`source_url` TEXT NOT NULL DEFAULT \"\",`is_todo` INT NOT NULL DEFAULT 0,`todo_due` INT NOT NULL DEFAULT 0,`todo_completed` INT NOT NULL DEFAULT 0,`source` TEXT NOT NULL DEFAULT \"\",`source_application` TEXT NOT NULL DEFAULT \"\",`application_data` TEXT NOT NULL DEFAULT \"\",`order` NUMERIC NOT NULL DEFAULT 0,`user_created_time` INT NOT NULL DEFAULT 0,`user_updated_time` INT NOT NULL DEFAULT 0,`encryption_cipher_text` TEXT NOT NULL DEFAULT \"\",`encryption_applied` INT NOT NULL DEFAULT 0,`markup_language` INT NOT NULL DEFAULT 1,`is_shared` INT NOT NULL DEFAULT 0, share_id TEXT NOT NULL DEFAULT \"\", conflict_original_id TEXT NOT NULL DEFAULT \"\", master_key_id TEXT NOT NULL DEFAULT \"\", `user_data` TEXT NOT NULL DEFAULT \"\", `deleted_time` INT NOT NULL DEFAULT 0)",
+            [],
+        )?;
+        
+        conn.execute(
+            "CREATE TABLE folders (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT \"\", created_time INT NOT NULL, updated_time INT NOT NULL, user_created_time INT NOT NULL DEFAULT 0, user_updated_time INT NOT NULL DEFAULT 0, encryption_cipher_text TEXT NOT NULL DEFAULT \"\", encryption_applied INT NOT NULL DEFAULT 0, parent_id TEXT NOT NULL DEFAULT \"\", is_shared INT NOT NULL DEFAULT 0, share_id TEXT NOT NULL DEFAULT \"\", master_key_id TEXT NOT NULL DEFAULT \"\", icon TEXT NOT NULL DEFAULT \"\", `user_data` TEXT NOT NULL DEFAULT \"\", `deleted_time` INT NOT NULL DEFAULT 0)",
+            [],
+        )?;
+        
+        // Insert test data
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
+        
+        // Create a folder
+        conn.execute(
+            "INSERT INTO folders (id, title, created_time, updated_time, user_created_time, user_updated_time, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            ["folder1", "Documents", &now.to_string(), &now.to_string(), &now.to_string(), &now.to_string(), ""],
+        )?;
+        
+        // Create a note in root
+        conn.execute(
+            "INSERT INTO notes (id, title, body, created_time, updated_time, user_created_time, user_updated_time, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            ["note1", "readme.txt", "This is a test note in root", &now.to_string(), &now.to_string(), &now.to_string(), &now.to_string(), ""],
+        )?;
+        
+        // Create a note in folder
+        conn.execute(
+            "INSERT INTO notes (id, title, body, created_time, updated_time, user_created_time, user_updated_time, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            ["note2", "document.md", "This is a test note in Documents folder", &now.to_string(), &now.to_string(), &now.to_string(), &now.to_string(), "folder1"],
+        )?;
+        
+        Ok(conn)
+    }
+
+    #[test]
+    fn test_filesystem_operations() {
+        let conn = create_test_db().expect("Failed to create test database");
+        let mut fs = SqliteFS {
+            db: conn,
+            inode_map: std::collections::HashMap::new(),
+            reverse_inode_map: std::collections::HashMap::new(),
+            next_inode: 2,
+        };
+        
+        // Initialize root directory
+        fs.inode_map.insert("/".to_string(), 1);
+        fs.reverse_inode_map.insert(1, "/".to_string());
+        
+        // Test direct database queries to verify our setup
+        let folder_count: i64 = fs.db.query_row(
+            "SELECT COUNT(*) FROM folders WHERE parent_id = '' AND deleted_time = 0",
+            [],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(folder_count, 1, "Expected 1 folder in root");
+        
+        let note_count: i64 = fs.db.query_row(
+            "SELECT COUNT(*) FROM notes WHERE parent_id = '' AND deleted_time = 0",
+            [],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(note_count, 1, "Expected 1 note in root");
+        
+        // Test that we can find the Documents folder
+        let documents_exists = fs.db.query_row(
+            "SELECT title FROM folders WHERE parent_id = '' AND title = 'Documents' AND deleted_time = 0",
+            [],
+            |row| row.get::<_, String>(0)
+        );
+        assert!(documents_exists.is_ok(), "Documents folder should exist");
+        assert_eq!(documents_exists.unwrap(), "Documents");
+        
+        // Test that we can find the readme.txt note
+        let readme_exists = fs.db.query_row(
+            "SELECT title, body FROM notes WHERE parent_id = '' AND title = 'readme.txt' AND deleted_time = 0",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        );
+        assert!(readme_exists.is_ok(), "readme.txt should exist");
+        let (title, body) = readme_exists.unwrap();
+        assert_eq!(title, "readme.txt");
+        assert_eq!(body, "This is a test note in root");
+        
+        // Test that we can find the document in the Documents folder
+        let document_exists = fs.db.query_row(
+            "SELECT title, body FROM notes WHERE parent_id = 'folder1' AND title = 'document.md' AND deleted_time = 0",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        );
+        assert!(document_exists.is_ok(), "document.md should exist in Documents folder");
+        let (title, body) = document_exists.unwrap();
+        assert_eq!(title, "document.md");
+        assert_eq!(body, "This is a test note in Documents folder");
+        
+        // Test inode mapping
+        let readme_inode = fs.get_or_create_inode("/readme.txt");
+        let documents_inode = fs.get_or_create_inode("/Documents");
+        
+        // Verify inodes are unique
+        assert_ne!(readme_inode, documents_inode);
+        assert_ne!(readme_inode, 1); // Not root
+        assert_ne!(documents_inode, 1); // Not root
+        
+        // Test path resolution
+        assert_eq!(fs.get_path_from_inode(1), Some(&"/".to_string()));
+        assert_eq!(fs.get_path_from_inode(readme_inode), Some(&"/readme.txt".to_string()));
+        assert_eq!(fs.get_path_from_inode(documents_inode), Some(&"/Documents".to_string()));
+        
+        println!("All tests passed!");
+        println!("- Database setup: ✓");
+        println!("- Folder creation: ✓");
+        println!("- Note creation: ✓");
+        println!("- Hierarchy structure: ✓");
+        println!("- Inode mapping: ✓");
+        println!("- Path resolution: ✓");
+    }
+
+}
