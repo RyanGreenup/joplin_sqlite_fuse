@@ -93,10 +93,23 @@ impl SqliteFS {
         }
     }
     
+    /// Generate a UUID v4 string for database record IDs
     fn generate_uuid() -> String {
         Uuid::new_v4().to_string()
     }
     
+    /// Create a new folder in the database
+    /// 
+    /// This helper method handles the database insertion for new folders,
+    /// including UUID generation, timestamp management, and parent relationship setup.
+    /// 
+    /// Arguments:
+    /// - parent_path: Filesystem path of the parent directory (e.g., "/Projects")
+    /// - folder_name: Name of the new folder to create
+    /// 
+    /// Returns:
+    /// - Ok(String): UUID of the newly created folder
+    /// - Err: Database error if insertion fails
     fn create_folder(&mut self, parent_path: &str, folder_name: &str) -> Result<String> {
         // Get the parent folder ID
         let parent_folder_id = self.get_parent_folder_id(parent_path)?;
@@ -119,6 +132,19 @@ impl SqliteFS {
         Ok(folder_id)
     }
     
+    /// Create a new note (file) in the database
+    /// 
+    /// This helper method handles the database insertion for new notes,
+    /// including UUID generation, content storage, and parent relationship setup.
+    /// 
+    /// Arguments:
+    /// - parent_path: Filesystem path of the parent directory (e.g., "/Projects")
+    /// - file_name: Name of the new file (with .md suffix, will be stripped for DB)
+    /// - content: Initial content to store in the note's body field
+    /// 
+    /// Returns:
+    /// - Ok(String): UUID of the newly created note
+    /// - Err: Database error if insertion fails
     fn create_note(&mut self, parent_path: &str, file_name: &str, content: &str) -> Result<String> {
         // Get the parent folder ID
         let parent_folder_id = self.get_parent_folder_id(parent_path)?;
@@ -551,6 +577,15 @@ impl Filesystem for SqliteFS {
         reply.ok();
     }
 
+    /// Handle directory creation operations
+    /// This method is called when users create new directories using mkdir().
+    /// It creates a new folder record in the database with proper UUID and parent relationships.
+    /// 
+    /// Key behaviors:
+    /// - Generates UUID v4 for the new folder's database ID
+    /// - Resolves parent path to parent folder UUID for database foreign key
+    /// - Sets appropriate timestamps (created_time, updated_time, etc.)
+    /// - Creates filesystem inode mapping for the new directory
     fn mkdir(
         &mut self,
         _req: &Request,
@@ -622,6 +657,10 @@ impl Filesystem for SqliteFS {
         }
     }
 
+    /// Handle file creation operations
+    /// This method is called when new files are created using open() with O_CREAT flag
+    /// or when using system calls like creat(). It creates a new note in the database
+    /// and returns file attributes along with a file handle.
     fn create(
         &mut self,
         _req: &Request,
@@ -695,6 +734,16 @@ impl Filesystem for SqliteFS {
         }
     }
 
+    /// Handle file write operations
+    /// This method is called when applications write data to open files.
+    /// It supports both overwriting (offset 0) and appending/inserting at specific offsets.
+    /// The content is immediately written to the database's 'body' field.
+    /// 
+    /// Key behaviors:
+    /// - offset 0: Completely overwrites existing content
+    /// - offset > 0: Inserts/appends data at the specified position
+    /// - Updates timestamps (updated_time, user_updated_time) in database
+    /// - Strips .md suffix when looking up notes in database
     fn write(
         &mut self,
         _req: &Request,
@@ -791,6 +840,246 @@ impl Filesystem for SqliteFS {
             Err(_) => {
                 reply.error(libc::EIO);
             }
+        }
+    }
+
+    /// Handle file opening operations
+    /// This method is called when editors or applications use open() system call
+    /// to open existing files for reading or writing
+    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+        // Verify that the inode exists and corresponds to a valid file
+        let path = match self.get_path_from_inode(ino) {
+            Some(path) => path.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Extract the filename and parent path for database verification
+        let (parent_path, filename) = if let Some(pos) = path.rfind('/') {
+            let parent = &path[..pos];
+            let name = &path[pos + 1..];
+            (if parent.is_empty() { "/" } else { parent }, name)
+        } else {
+            ("/", &path[..])
+        };
+
+        // Verify the file exists in the database
+        let parent_folder_id = match self.get_parent_folder_id(parent_path) {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let db_title = Self::strip_md_suffix(filename);
+
+        // Check if the note exists in the database
+        let note_exists = self.db.query_row(
+            "SELECT 1 FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
+            [&parent_folder_id, db_title],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        if note_exists {
+            // File exists, return success with the inode as file handle
+            // Using the inode as file handle simplifies file handle management
+            reply.opened(ino, 0);
+        } else {
+            // File doesn't exist in database
+            reply.error(ENOENT);
+        }
+    }
+
+    /// Handle file attribute setting operations
+    /// This method is called when editors or applications try to set file attributes
+    /// such as timestamps, file size, permissions, etc. Many editors require this
+    /// operation to function properly.
+    /// 
+    /// Key behaviors:
+    /// - Handles size changes (truncation/extension of file content)
+    /// - Updates timestamps in the database when modified
+    /// - Validates that the file exists before making changes
+    /// - Returns updated file attributes after successful changes
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        // Get the file path from inode
+        let path = match self.get_path_from_inode(ino) {
+            Some(path) => path.clone(),
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Extract the filename and parent path for database operations
+        let (parent_path, filename) = if let Some(pos) = path.rfind('/') {
+            let parent = &path[..pos];
+            let name = &path[pos + 1..];
+            (if parent.is_empty() { "/" } else { parent }, name)
+        } else {
+            ("/", &path[..])
+        };
+
+        // Get the parent folder ID and strip .md suffix for database lookup
+        let parent_folder_id = match self.get_parent_folder_id(parent_path) {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let db_title = Self::strip_md_suffix(filename);
+
+        // Handle size changes (file truncation/extension)
+        if let Some(new_size) = size {
+            // Get current content to modify its size
+            let current_content = match self.db.query_row(
+                "SELECT body FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
+                [&parent_folder_id, db_title],
+                |row| row.get::<_, String>(0)
+            ) {
+                Ok(content) => content,
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+
+            let mut content_bytes = current_content.into_bytes();
+            let current_size = content_bytes.len();
+            let target_size = new_size as usize;
+
+            // Adjust content size based on target
+            if target_size < current_size {
+                // Truncate content
+                content_bytes.truncate(target_size);
+            } else if target_size > current_size {
+                // Extend content with null bytes
+                content_bytes.resize(target_size, 0);
+            }
+
+            let new_content = String::from_utf8_lossy(&content_bytes).to_string();
+
+            // Update content in database
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+
+            if let Err(_) = self.db.execute(
+                "UPDATE notes SET body = ?1, updated_time = ?2, user_updated_time = ?3 WHERE parent_id = ?4 AND title = ?5 AND deleted_time = 0",
+                [&new_content, &now.to_string(), &now.to_string(), &parent_folder_id, db_title],
+            ) {
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        // Get current file information for returning updated attributes
+        let (content_size, created_time, updated_time) = match self.db.query_row(
+            "SELECT body, created_time, updated_time FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
+            [&parent_folder_id, db_title],
+            |row| {
+                let body: String = row.get(0)?;
+                let created: i64 = row.get(1)?;
+                let updated: i64 = row.get(2)?;
+                Ok((body.len(), created, updated))
+            }
+        ) {
+            Ok(data) => data,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Return updated file attributes
+        let attr = FileAttr {
+            ino,
+            size: content_size as u64,
+            blocks: ((content_size + 511) / 512) as u64,
+            atime: UNIX_EPOCH + Duration::from_secs(created_time as u64),
+            mtime: UNIX_EPOCH + Duration::from_secs(updated_time as u64),
+            ctime: UNIX_EPOCH + Duration::from_secs(updated_time as u64),
+            crtime: UNIX_EPOCH + Duration::from_secs(created_time as u64),
+            kind: FileType::RegularFile,
+            perm: mode.unwrap_or(0o644) as u16,
+            nlink: 1,
+            uid: uid.unwrap_or(501),
+            gid: gid.unwrap_or(20),
+            rdev: 0,
+            flags: 0,
+            blksize: 512,
+        };
+
+        reply.attr(&TTL, &attr);
+    }
+
+    /// Handle file flush operations
+    /// This method is called when editors or applications want to ensure that
+    /// all pending writes have been completed. Since we write directly to the
+    /// database in our write() method, this is essentially a no-op, but we
+    /// need to implement it for editor compatibility.
+    /// 
+    /// Key behaviors:
+    /// - Always returns success since writes are already persistent
+    /// - Required for proper editor functionality (many editors call flush before close)
+    /// - Validates that the file handle corresponds to a valid file
+    fn flush(&mut self, _req: &Request, ino: u64, _fh: u64, _lock_owner: u64, reply: fuser::ReplyEmpty) {
+        // Verify that the inode exists (basic validation)
+        if self.get_path_from_inode(ino).is_some() {
+            // Since we write directly to the database, flush is always successful
+            reply.ok();
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    /// Handle file release (close) operations
+    /// This method is called when a file handle is closed. Since we don't
+    /// maintain any file-specific state or resources, this is essentially
+    /// a no-op, but it's required for proper FUSE operation.
+    /// 
+    /// Key behaviors:
+    /// - Always returns success since no cleanup is needed
+    /// - Called when editors close files or when file handles are released
+    /// - Validates that the file handle corresponds to a valid file
+    fn release(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        // Verify that the inode exists (basic validation)
+        if self.get_path_from_inode(ino).is_some() {
+            // No cleanup needed since we don't maintain file-specific resources
+            reply.ok();
+        } else {
+            reply.error(ENOENT);
         }
     }
 }
