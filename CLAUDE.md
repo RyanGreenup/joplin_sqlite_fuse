@@ -23,20 +23,20 @@ For testing purposes the ./database.sqlite file may be used.
 The user cares primarily with:
 
 1. Creating
-    - Folders
-    - Files
+    - [ ] Folders
+    - [ ] Files
 2. Read
-    - Listing Content under Directories
-    - Reading the contents of a file (e.g. `cat`)
+    - [X] Listing Content under Directories
+    - [X] Reading the contents of a file (e.g. `cat`)
 3. Update
-    - Renaming Files (to change the `title`)
-    - Renaming Folders (to change the `title`)
-    - Changing the content of a note (to change the `body`)
-    - Moving Folders and all children recursively (e.g. `mv`)
-    - Moving Files
+    - [ ] Renaming Files (to change the `title`)
+    - [ ] Renaming Folders (to change the `title`)
+    - [ ] Changing the content of a note (to change the `body`)
+    - [ ] Moving Folders and all children recursively (e.g. `mv`)
+    - [ ] Moving Files
 4. Delete
-    - Deleting Files (`rm`)
-    - Deleting Folders (`rm -r`)
+    - [ ] Deleting Files (`rm`)
+    - [ ] Deleting Folders (`rm -r`)
 
 ## Development Commands
 
