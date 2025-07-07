@@ -22,6 +22,27 @@ struct SqliteFS {
 impl SqliteFS {
     fn new(db_path: &str) -> Result<Self> {
         let db = Connection::open(db_path)?;
+
+        // Create performance indexes if they don't exist
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_folders_parent_title ON folders(parent_id, title) WHERE deleted_time = 0",
+            [],
+        )?;
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notes_parent_title ON notes(parent_id, title) WHERE deleted_time = 0",
+            [],
+        )?;
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_folders_parent_updated ON folders(parent_id, user_updated_time) WHERE deleted_time = 0",
+            [],
+        )?;
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notes_parent_updated ON notes(parent_id, user_updated_time) WHERE deleted_time = 0",
+            [],
+        )?;
+
+
+
         let mut fs = SqliteFS {
             db,
             inode_map: HashMap::new(),
@@ -1290,9 +1311,9 @@ impl Filesystem for SqliteFS {
         // Delete the note with the most recent user_updated_time
         let result = self.db.execute(
             "DELETE FROM notes WHERE id = (
-                SELECT id FROM notes 
-                WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 
-                ORDER BY user_updated_time DESC 
+                SELECT id FROM notes
+                WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0
+                ORDER BY user_updated_time DESC
                 LIMIT 1
             )",
             [&parent_folder_id, title],
@@ -1363,9 +1384,9 @@ impl Filesystem for SqliteFS {
 
         // First, get the folder ID that we want to delete
         let folder_to_delete_id: Result<String, rusqlite::Error> = self.db.query_row(
-            "SELECT id FROM folders 
-             WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 
-             ORDER BY user_updated_time DESC 
+            "SELECT id FROM folders
+             WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0
+             ORDER BY user_updated_time DESC
              LIMIT 1",
             [&parent_folder_id, dirname],
             |row| row.get(0),
