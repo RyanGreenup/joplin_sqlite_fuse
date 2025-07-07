@@ -41,8 +41,6 @@ impl SqliteFS {
             [],
         )?;
 
-
-
         let mut fs = SqliteFS {
             db,
             inode_map: HashMap::new(),
