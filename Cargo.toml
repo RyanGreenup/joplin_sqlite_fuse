@@ -8,3 +8,4 @@ clap = { version = "4.5.40", features = ["derive"] }
 env_logger = "0.11.8"
 fuser = "0.15.1"
 libc = "0.2.174"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
