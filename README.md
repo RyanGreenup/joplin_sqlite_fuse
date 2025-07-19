@@ -193,6 +193,76 @@ The filesystem implements all standard FUSE operations:
     umount -l ${dir_path}
     ```
 4. **Performance Issues**: Ensure database indexes are created (automatic on first mount)
+5. **Changing ID Values**: Neovim / Vim Writes to a temporary file and then copies that to the current file, causing a new file to be created. Modify this behaviour like so:
+
+  ```vim
+  % Get the current Value
+  set backupcopy
+  % Auto by default
+
+  ```
+
+  ```lua
+  -- Do Not Write a backup file (as in yes write directly)
+  vim.cmd([[set backupcopy=yes]])
+
+  ```
+
+  I think vim does something like this:
+
+  ```
+  mv file.md file.md~ && cp file.md~ file.md
+  # Perform edit to file.md~
+  mv file.md~ file.md
+  ```
+
+  So `file.md~` gets the id of the `file.md` and `file.md` gets some new id. It's not entirely clear to me yet. I gave up because `set backupcopy=yes` solved my issue. This makes it complex because ID values must be unique as they are a `PRIMARY KEY`.
+
+  If one wants to try to fix this so that:
+
+  ```sh
+  test -f file.md && \
+      mv temp_file.md file.md
+  ```
+
+  preserves the ID from `file.md` Then start by adding the following to the end of the `write` method in `src/main.rs`.
+
+  ```rust
+  fn write (...) {
+      ...
+        // DEBUG PRINT
+        println!("Performing Read operation on: {path}");
+        let stmt = format!("SELECT id, title FROM notes WHERE title LIKE '%{}%'", db_title);
+        println!("{stmt}");
+        let mut stmt = self.db.prepare(&stmt).expect("Failed to prepare statement");
+
+        let note_iter = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0).expect("Failed to get id from row");
+                let title: String = row.get(1).expect("Failed to get title from row");
+                Ok((id, title))
+            })
+            .expect("Failed to execute query and map the results");
+
+        for note in note_iter {
+            match note {
+                Ok((id, title)) => println!("Found id: {:#?} with title: {:#?}", id, title),
+                Err(e) => eprintln!("Error reading note: {}", e),
+            }
+        }
+
+        // DEBUG PRINT
+  }
+
+  ```
+
+  A first step might be ensuring that every file under the directory has `UUID` in the file after every operation. Again, `set backupcopy=yes` solved my issue for now.
+
+  I don't know how to solve this in Helix, but id doesn't affect Emacs, vis or VSCode so it's a pretty minor issue given that it `set backupcopy=yes` resolves the issue.
+
+  This doesn't work with `zeditor` at all yet so `#TODO`.
+
+
 
 ### Debugging
 Enable debug logging to see detailed operation traces:
