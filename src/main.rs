@@ -212,6 +212,7 @@ impl SqliteFS {
     /// Common extension mappings
     /// In the unified schema, the database stores extensions directly (e.g., "md", "py", "rs")
     /// This provides a central source of truth for supported file types
+    /// See ~/Sync/Projects/solid-js/lilium/src/lib/db/types.ts
     const SUPPORTED_EXTENSIONS: &'static [&'static str] = &[
         "md",    // Markdown
         "org",   // Org-mode
@@ -1795,15 +1796,15 @@ impl Filesystem for SqliteFS {
                         if let Some(new_dot_pos) = new_name.rfind('.') {
                             let new_ext = &new_name[new_dot_pos + 1..];
                             let new_extension = Self::normalize_extension(new_ext);
-                            
+
                             // Get current timestamp in Australia/Sydney timezone
                             let now = Self::current_timestamp();
-                            
+
                             let update_result = self.db.execute(
                                 "UPDATE notes SET syntax = ?1, updated_at = ?2 WHERE id = ?3",
                                 rusqlite::params![new_extension, &now, parent_id]
                             );
-                            
+
                             match update_result {
                                 Ok(rows_affected) => {
                                     if rows_affected > 0 {
@@ -1818,12 +1819,12 @@ impl Filesystem for SqliteFS {
                                         } else {
                                             format!("{new_parent_path}/{new_name}")
                                         };
-                                        
+
                                         if let Some(inode) = self.inode_map.remove(&old_path) {
                                             self.inode_map.insert(new_path.clone(), inode);
                                             self.reverse_inode_map.insert(inode, new_path);
                                         }
-                                        
+
                                         reply.ok();
                                         return;
                                     }
@@ -1857,7 +1858,7 @@ impl Filesystem for SqliteFS {
 
         // Find the note to rename and get its current syntax
         let note_query = "SELECT id, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
-        
+
         let note_result = self.db.query_row(
             note_query,
             rusqlite::params![parent_note_id, old_title],
