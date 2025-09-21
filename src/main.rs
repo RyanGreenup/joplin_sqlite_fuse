@@ -1776,26 +1776,137 @@ impl Filesystem for SqliteFS {
             }
         };
 
+        // Handle special case for index files (index.{ext})
+        if old_name.starts_with("index.") && new_name.starts_with("index.") {
+            // Renaming index file - this changes the parent note's syntax
+            if let Some(parent_id) = &parent_note_id {
+                if let Some(new_parent_id) = &new_parent_note_id {
+                    if parent_id == new_parent_id {
+                        // Same parent, just changing syntax
+                        if let Some(new_dot_pos) = new_name.rfind('.') {
+                            let new_ext = &new_name[new_dot_pos + 1..];
+                            let new_syntax = Self::get_syntax_from_extension(new_ext);
+                            
+                            // Get current timestamp as string (matching existing data format)
+                            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                            
+                            let update_result = self.db.execute(
+                                "UPDATE notes SET syntax = ?1, updated_at = ?2 WHERE id = ?3",
+                                rusqlite::params![new_syntax, &now, parent_id]
+                            );
+                            
+                            match update_result {
+                                Ok(rows_affected) => {
+                                    if rows_affected > 0 {
+                                        // Update inode mappings
+                                        let old_path = if parent_path == "/" {
+                                            format!("/{old_name}")
+                                        } else {
+                                            format!("{parent_path}/{old_name}")
+                                        };
+                                        let new_path = if new_parent_path == "/" {
+                                            format!("/{new_name}")
+                                        } else {
+                                            format!("{new_parent_path}/{new_name}")
+                                        };
+                                        
+                                        if let Some(inode) = self.inode_map.remove(&old_path) {
+                                            self.inode_map.insert(new_path.clone(), inode);
+                                            self.reverse_inode_map.insert(inode, new_path);
+                                        }
+                                        
+                                        reply.ok();
+                                        return;
+                                    }
+                                }
+                                Err(_) => {
+                                    reply.error(libc::EIO);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            reply.error(ENOENT);
+            return;
+        }
+
+        // Handle regular file/directory renaming
+        // Extract titles and extensions
+        let (old_title, old_ext) = if let Some(dot_pos) = old_name.rfind('.') {
+            (&old_name[..dot_pos], Some(&old_name[dot_pos + 1..]))
+        } else {
+            (old_name, None)
+        };
+
+        let (new_title, new_ext) = if let Some(dot_pos) = new_name.rfind('.') {
+            (&new_name[..dot_pos], Some(&new_name[dot_pos + 1..]))
+        } else {
+            (new_name, None)
+        };
+
+        // Find the note to rename and get its current syntax
+        let note_query = "SELECT id, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
+        
+        let note_result = self.db.query_row(
+            note_query,
+            rusqlite::params![parent_note_id, old_title],
+            |row| {
+                let id: String = row.get(0)?;
+                let syntax: String = row.get(1)?;
+                Ok((id, syntax))
+            }
+        );
+
+        let (note_id, current_syntax) = match note_result {
+            Ok(result) => result,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        // Validate old extension matches current syntax (if file has extension)
+        if let Some(old_extension) = old_ext {
+            let expected_ext = Self::get_extension_from_syntax(&current_syntax);
+            if old_extension != expected_ext {
+                reply.error(ENOENT);
+                return;
+            }
+        }
+
+        // Check if this note has children to determine if it's a directory
+        let has_children = self.db.query_row(
+            "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+            [&note_id],
+            |row| row.get::<_, i64>(0)
+        ).unwrap_or(0) > 0;
+
+        // Determine the new syntax
+        let new_syntax = if has_children {
+            // This is a directory - extension change means syntax change but still a directory
+            if let Some(new_extension) = new_ext {
+                Self::get_syntax_from_extension(new_extension)
+            } else {
+                &current_syntax
+            }
+        } else {
+            // This is a file - validate extension and determine syntax
+            if let Some(new_extension) = new_ext {
+                Self::get_syntax_from_extension(new_extension)
+            } else {
+                "text" // No extension defaults to text
+            }
+        };
+
         // Get current timestamp as string (matching existing data format)
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-        // Determine old and new titles by stripping extensions if present
-        let old_title = if let Some(dot_pos) = old_name.rfind('.') {
-            &old_name[..dot_pos]
-        } else {
-            old_name
-        };
-
-        let new_title = if let Some(dot_pos) = new_name.rfind('.') {
-            &new_name[..dot_pos]
-        } else {
-            new_name
-        };
-
-        // Find and update the note in the unified table
+        // Update the note with new title, parent, and syntax
         let update_result = self.db.execute(
-            "UPDATE notes SET title = ?1, parent_id = ?2, updated_at = ?3 WHERE parent_id IS ?4 AND title = ?5",
-            rusqlite::params![new_title, new_parent_note_id, &now, parent_note_id, old_title]
+            "UPDATE notes SET title = ?1, parent_id = ?2, syntax = ?3, updated_at = ?4 WHERE id = ?5",
+            rusqlite::params![new_title, new_parent_note_id, new_syntax, &now, &note_id]
         );
 
         match update_result {
