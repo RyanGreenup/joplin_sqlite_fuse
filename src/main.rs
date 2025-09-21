@@ -23,21 +23,21 @@ impl SqliteFS {
     fn new(db_path: &str) -> Result<Self> {
         let db = Connection::open(db_path)?;
 
-        // Create performance indexes if they don't exist
+        // Create performance indexes for unified notes table
         db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_folders_parent_title ON folders(parent_id, title) WHERE deleted_time = 0",
+            "CREATE INDEX IF NOT EXISTS idx_notes_parent_title ON notes(parent_id, title)",
             [],
         )?;
         db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_notes_parent_title ON notes(parent_id, title) WHERE deleted_time = 0",
+            "CREATE INDEX IF NOT EXISTS idx_notes_parent_updated ON notes(parent_id, updated_at DESC)",
             [],
         )?;
         db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_folders_parent_updated ON folders(parent_id, user_updated_time) WHERE deleted_time = 0",
+            "CREATE INDEX IF NOT EXISTS idx_notes_parent_id ON notes(parent_id)",
             [],
         )?;
         db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_notes_parent_updated ON notes(parent_id, user_updated_time) WHERE deleted_time = 0",
+            "CREATE INDEX IF NOT EXISTS idx_notes_user_id ON notes(user_id)",
             [],
         )?;
 
