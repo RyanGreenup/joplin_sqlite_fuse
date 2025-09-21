@@ -15,6 +15,9 @@ use uuid::Uuid;
 const TTL: Duration = Duration::from_secs(1); // 1 second
 const TIMEZONE: Tz = Sydney; // Australia/Sydney timezone
 
+
+const USER_ID: &str = "84a9e6d1ba7f6fd229c4276440d43886";
+
 /// # Unified Notes Schema FUSE Filesystem
 ///
 /// This filesystem implements a unified schema where both files and folders are represented
@@ -82,6 +85,43 @@ impl SqliteFS {
         let utc_now = Utc::now();
         let sydney_time = utc_now.with_timezone(&TIMEZONE);
         sydney_time.format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    /// Helper function to get or create a note with the given title and parent
+    /// Returns the note ID, either existing or newly created
+    fn get_or_create_note(
+        &mut self,
+        parent_path: &str,
+        title: &str,
+        content: &str,
+        extension: &str,
+    ) -> Result<String> {
+        // Get the parent note ID
+        let parent_note_id = if parent_path == "/" {
+            None
+        } else {
+            Some(self.get_parent_folder_id(parent_path)?)
+        };
+
+        // Check if a note with this title already exists in the parent
+        let existing_note_query = "SELECT id FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
+        let existing_note_result = self.db.query_row(
+            existing_note_query,
+            rusqlite::params![parent_note_id, title],
+            |row| row.get::<_, String>(0)
+        );
+
+        match existing_note_result {
+            Ok(existing_id) => {
+                // Note already exists, use existing ID
+                Ok(existing_id)
+            },
+            Err(_) => {
+                // Note doesn't exist, create new one
+                let user_id = USER_ID;
+                self.create_note(parent_path, title, content, extension, user_id)
+            }
+        }
     }
 
     fn new(db_path: &str) -> Result<Self> {
@@ -989,12 +1029,17 @@ impl Filesystem for SqliteFS {
             }
         };
 
-        // Create the note/folder in the database with empty content
-        // TODO: Get actual user_id from request or configuration
-        let user_id = "default_user"; // Placeholder
+        // Get or create the note for this folder
+        let _note_id = match self.get_or_create_note(&parent_path, folder_name, "", "md") {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
 
-        match self.create_note(&parent_path, folder_name, "", "md", user_id) {
-            Ok(_note_id) => {
+        // Use the note_id (either existing or newly created) for further operations
+        {
                 // Create the full path for the new directory
                 let full_path = if parent_path == "/" {
                     format!("/{folder_name}")
@@ -1030,10 +1075,6 @@ impl Filesystem for SqliteFS {
                 };
 
                 reply.entry(&TTL, &attr, 0);
-            }
-            Err(_) => {
-                reply.error(libc::EIO);
-            }
         }
     }
 
@@ -1079,12 +1120,17 @@ impl Filesystem for SqliteFS {
             (file_name, "txt")
         };
 
-        // TODO: Get actual user_id from request or configuration
-        let user_id = "default_user"; // Placeholder
+        // Get or create the note for this file
+        let _note_id = match self.get_or_create_note(&parent_path, title, "", extension) {
+            Ok(id) => id,
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
 
-        // Create the note in the database with empty content initially
-        match self.create_note(&parent_path, title, "", extension, user_id) {
-            Ok(_note_id) => {
+        // Use the note_id (either existing or newly created) for further operations
+        {
                 // Create the full path for the new file
                 let full_path = if parent_path == "/" {
                     format!("/{file_name}")
@@ -1121,10 +1167,6 @@ impl Filesystem for SqliteFS {
 
                 // Return the created file with a file handle (using inode as fh)
                 reply.created(&TTL, &attr, 0, inode, 0);
-            }
-            Err(_) => {
-                reply.error(libc::EIO);
-            }
         }
     }
 
