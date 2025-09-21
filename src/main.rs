@@ -198,55 +198,54 @@ impl SqliteFS {
         Ok(note_id)
     }
 
-    /// Helper function to get file extension from syntax
-    /// Aligned with TypeScript SYNTAX_OPTIONS
-    fn get_extension_from_syntax(syntax: &str) -> &str {
-        match syntax {
-            "markdown" => "md",
-            "org" => "org",
-            "html" => "html",
-            "jsx" => "jsx",
-            "ipynb" => "ipynb",
-            "dokuwiki" => "dw",
-            "mediawiki" => "mw",
-            "latex" => "tex",
-            "typst" => "typ",
-            // Additional common syntaxes not in the main list
-            "python" => "py",
-            "javascript" => "js",
-            "typescript" => "ts",
-            "rust" => "rs",
-            "css" => "css",
-            "json" => "json",
+    /// Common extension mappings
+    /// In the unified schema, the database stores extensions directly (e.g., "md", "py", "rs")
+    /// This provides a central source of truth for supported file types
+    const SUPPORTED_EXTENSIONS: &'static [&'static str] = &[
+        "md",    // Markdown
+        "org",   // Org-mode
+        "html",  // HTML
+        "jsx",   // JSX
+        "ipynb", // Jupyter Notebook
+        "dw",    // DokuWiki
+        "mw",    // MediaWiki
+        "tex",   // LaTeX
+        "typ",   // Typst
+        "py",    // Python
+        "js",    // JavaScript
+        "ts",    // TypeScript
+        "rs",    // Rust
+        "css",   // CSS
+        "json",  // JSON
+        "yml",   // YAML
+        "yaml",  // YAML (alternative)
+        "xml",   // XML
+        "txt",   // Plain text
+    ];
+
+    /// Helper function to get extension from user input
+    /// Normalizes alternative extensions (e.g., "yaml" -> "yml")
+    fn normalize_extension(extension: &str) -> &str {
+        match extension {
             "yaml" => "yml",
-            "xml" => "xml",
-            _ => "txt",
+            "mw" => "dw", // Normalize MediaWiki to DokuWiki extension
+            _ => extension,
         }
     }
 
-    /// Helper function to get syntax from file extension
-    /// Aligned with TypeScript SYNTAX_OPTIONS
-    fn get_syntax_from_extension(extension: &str) -> &str {
-        match extension {
-            "md" => "markdown",
-            "org" => "org",
-            "html" => "html",
-            "jsx" => "jsx",
-            "ipynb" => "ipynb",
-            "dw" => "dokuwiki",
-            "mw" => "dokuwiki",
-            "tex" => "latex",
-            "typ" => "typst",
-            // Additional common extensions not in the main list
-            "py" => "python",
-            "js" => "javascript",
-            "ts" => "typescript",
-            "rs" => "rust",
-            "css" => "css",
-            "json" => "json",
-            "yml" | "yaml" => "yaml",
-            "xml" => "xml",
-            _ => "text",
+    /// Helper function to validate and get extension from filename
+    /// Returns the normalized extension or defaults to "txt"
+    fn get_extension_from_filename(filename: &str) -> &str {
+        if let Some(dot_pos) = filename.rfind('.') {
+            let ext = &filename[dot_pos + 1..];
+            let normalized = Self::normalize_extension(ext);
+            if Self::SUPPORTED_EXTENSIONS.contains(&normalized) {
+                normalized
+            } else {
+                "txt"
+            }
+        } else {
+            "txt"
         }
     }
 }
@@ -306,7 +305,7 @@ impl Filesystem for SqliteFS {
                         Ok((id, content, syntax, created_at, updated_at))
                     }
                 ) {
-                    let expected_ext = Self::get_extension_from_syntax(&note_result.2);
+                    let expected_ext = &note_result.2; // Extension is stored directly
                     let expected_index = format!("index.{}", expected_ext);
 
                     if name_str == expected_index {
@@ -413,7 +412,7 @@ impl Filesystem for SqliteFS {
                 if !has_children {
                     // This note has no children, so it's a file
                     // Verify the extension matches the syntax
-                    let expected_ext = Self::get_extension_from_syntax(&note_result.2);
+                    let expected_ext = &note_result.2;
                     if requested_ext == expected_ext {
                         let inode = self.get_or_create_inode(&full_path);
                         let content_size = note_result.1.len();
@@ -514,7 +513,7 @@ impl Filesystem for SqliteFS {
                         Ok((content, syntax, created_at, updated_at))
                     }
                 ) {
-                    let expected_ext = Self::get_extension_from_syntax(&note_result.1);
+                    let expected_ext = &note_result.1;
                     let expected_index = format!("index.{}", expected_ext);
 
                     if filename == expected_index {
@@ -617,7 +616,7 @@ impl Filesystem for SqliteFS {
                 if !has_children {
                     // This note has no children, so it's a file
                     // Verify the extension matches the syntax
-                    let expected_ext = Self::get_extension_from_syntax(&note_result.2);
+                    let expected_ext = &note_result.2;
                     if requested_ext == expected_ext {
                         let content_size = note_result.1.len();
                         let attr = FileAttr {
@@ -701,7 +700,7 @@ impl Filesystem for SqliteFS {
                         Ok((content, syntax))
                     }
                 ) {
-                    let expected_ext = Self::get_extension_from_syntax(&content.1);
+                    let expected_ext = &content.1;
                     let expected_index = format!("index.{}", expected_ext);
 
                     if filename == expected_index {
@@ -746,7 +745,7 @@ impl Filesystem for SqliteFS {
                 if !has_children {
                     // This note has no children, so it's a file
                     // Verify the extension matches the syntax
-                    let expected_ext = Self::get_extension_from_syntax(&note_result.2);
+                    let expected_ext = &note_result.2;
                     if requested_ext == expected_ext {
                         let content_bytes = note_result.1.as_bytes();
                         let start = offset as usize;
@@ -839,7 +838,7 @@ impl Filesystem for SqliteFS {
                 entries.push((inode, FileType::Directory, title.clone()));
 
                 // Pre-create inode for index file (for future access when subdirectory is listed)
-                let extension = Self::get_extension_from_syntax(&syntax);
+                let extension = &syntax;
                 let index_filename = format!("index.{}", extension);
                 let index_path = if path == "/" {
                     format!("/{title}/{index_filename}")
@@ -851,7 +850,7 @@ impl Filesystem for SqliteFS {
                 // It will be shown when the subdirectory is listed
             } else {
                 // This note has no children, so it's a file
-                let extension = Self::get_extension_from_syntax(&syntax);
+                let extension = &syntax;
                 let filename = format!("{}.{}", title, extension);
                 let full_path = if path == "/" {
                     format!("/{filename}")
@@ -877,7 +876,7 @@ impl Filesystem for SqliteFS {
             ) {
                 // Only add index file if the note has content
                 if !note_info.2.is_empty() {
-                    let extension = Self::get_extension_from_syntax(&note_info.1);
+                    let extension = &note_info.1;
                     let index_filename = format!("index.{}", extension);
                     let index_path = if path == "/" {
                         format!("/{index_filename}")
@@ -951,7 +950,7 @@ impl Filesystem for SqliteFS {
         // TODO: Get actual user_id from request or configuration
         let user_id = "default_user"; // Placeholder
 
-        match self.create_note(&parent_path, folder_name, "", "markdown", user_id) {
+        match self.create_note(&parent_path, folder_name, "", "md", user_id) {
             Ok(_note_id) => {
                 // Create the full path for the new directory
                 let full_path = if parent_path == "/" {
@@ -1027,22 +1026,21 @@ impl Filesystem for SqliteFS {
             }
         };
 
-        // Extract title and syntax from filename
-        let (title, syntax) = if let Some(dot_pos) = file_name.rfind('.') {
+        // Extract title and extension from filename
+        let (title, extension) = if let Some(dot_pos) = file_name.rfind('.') {
             let title = &file_name[..dot_pos];
-            let extension = &file_name[dot_pos + 1..];
-            let syntax = Self::get_syntax_from_extension(extension);
-            (title, syntax)
+            let ext = Self::get_extension_from_filename(file_name);
+            (title, ext)
         } else {
-            // No extension, default to text
-            (file_name, "text")
+            // No extension, default to txt
+            (file_name, "txt")
         };
 
         // TODO: Get actual user_id from request or configuration
         let user_id = "default_user"; // Placeholder
 
         // Create the note in the database with empty content initially
-        match self.create_note(&parent_path, title, "", syntax, user_id) {
+        match self.create_note(&parent_path, title, "", extension, user_id) {
             Ok(_note_id) => {
                 // Create the full path for the new file
                 let full_path = if parent_path == "/" {
@@ -1219,7 +1217,7 @@ impl Filesystem for SqliteFS {
                 }
             ) {
                 // Verify the extension matches the note's syntax
-                let expected_ext = Self::get_extension_from_syntax(&note_result.2);
+                let expected_ext = &note_result.2;
                 if requested_ext != expected_ext {
                     reply.error(ENOENT);
                     return;
@@ -1332,7 +1330,7 @@ impl Filesystem for SqliteFS {
                     [parent_id],
                     |row| {
                         let syntax: String = row.get(0)?;
-                        let expected_ext = Self::get_extension_from_syntax(&syntax);
+                        let expected_ext = &syntax;
                         let expected_index = format!("index.{}", expected_ext);
                         Ok(filename == expected_index)
                     }
@@ -1375,7 +1373,7 @@ impl Filesystem for SqliteFS {
         ) {
             // Verify the file extension matches the note's syntax
             if let Some(req_ext) = requested_ext {
-                let expected_ext = Self::get_extension_from_syntax(&syntax);
+                let expected_ext = &syntax;
                 if req_ext != expected_ext {
                     reply.error(ENOENT);
                     return;
@@ -1785,14 +1783,14 @@ impl Filesystem for SqliteFS {
                         // Same parent, just changing syntax
                         if let Some(new_dot_pos) = new_name.rfind('.') {
                             let new_ext = &new_name[new_dot_pos + 1..];
-                            let new_syntax = Self::get_syntax_from_extension(new_ext);
+                            let new_extension = Self::normalize_extension(new_ext);
                             
                             // Get current timestamp as string (matching existing data format)
                             let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
                             
                             let update_result = self.db.execute(
                                 "UPDATE notes SET syntax = ?1, updated_at = ?2 WHERE id = ?3",
-                                rusqlite::params![new_syntax, &now, parent_id]
+                                rusqlite::params![new_extension, &now, parent_id]
                             );
                             
                             match update_result {
@@ -1869,7 +1867,7 @@ impl Filesystem for SqliteFS {
 
         // Validate old extension matches current syntax (if file has extension)
         if let Some(old_extension) = old_ext {
-            let expected_ext = Self::get_extension_from_syntax(&current_syntax);
+            let expected_ext = &current_syntax;
             if old_extension != expected_ext {
                 reply.error(ENOENT);
                 return;
@@ -1883,30 +1881,30 @@ impl Filesystem for SqliteFS {
             |row| row.get::<_, i64>(0)
         ).unwrap_or(0) > 0;
 
-        // Determine the new syntax
-        let new_syntax = if has_children {
-            // This is a directory - extension change means syntax change but still a directory
-            if let Some(new_extension) = new_ext {
-                Self::get_syntax_from_extension(new_extension)
+        // Determine the new extension
+        let new_extension = if has_children {
+            // This is a directory - extension change means extension change but still a directory
+            if let Some(new_ext) = new_ext {
+                Self::normalize_extension(new_ext)
             } else {
                 &current_syntax
             }
         } else {
-            // This is a file - validate extension and determine syntax
-            if let Some(new_extension) = new_ext {
-                Self::get_syntax_from_extension(new_extension)
+            // This is a file - validate extension and determine extension
+            if let Some(new_ext) = new_ext {
+                Self::normalize_extension(new_ext)
             } else {
-                "text" // No extension defaults to text
+                "txt" // No extension defaults to txt
             }
         };
 
         // Get current timestamp as string (matching existing data format)
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-        // Update the note with new title, parent, and syntax
+        // Update the note with new title, parent, and extension
         let update_result = self.db.execute(
             "UPDATE notes SET title = ?1, parent_id = ?2, syntax = ?3, updated_at = ?4 WHERE id = ?5",
-            rusqlite::params![new_title, new_parent_note_id, new_syntax, &now, &note_id]
+            rusqlite::params![new_title, new_parent_note_id, new_extension, &now, &note_id]
         );
 
         match update_result {
@@ -2015,7 +2013,7 @@ impl Filesystem for SqliteFS {
                     // Extract the requested extension
                     if let Some(dot_pos) = filename.rfind('.') {
                         let requested_ext = &filename[dot_pos + 1..];
-                        let expected_ext = Self::get_extension_from_syntax(&parent_syntax);
+                        let expected_ext = &parent_syntax;
 
                         // Verify the extension matches the parent note's syntax
                         if requested_ext == expected_ext {
@@ -2096,7 +2094,7 @@ impl Filesystem for SqliteFS {
 
         // Validate that the requested extension matches the note's syntax
         if let Some(ext) = requested_ext {
-            let expected_ext = Self::get_extension_from_syntax(&note_syntax);
+            let expected_ext = &note_syntax;
             if ext != expected_ext {
                 // Extension doesn't match the note's syntax
                 reply.error(ENOENT);
@@ -2150,13 +2148,14 @@ impl Filesystem for SqliteFS {
         }
     }
 
-    /// Handle directory deletion operations
-    /// This method is called when a directory is deleted (e.g., using rmdir command).
-    /// It removes the corresponding row from the folders table in the database.
+    /// Handle directory deletion operations (unified schema)
+    ///
+    /// In the unified schema, deleting a directory means deleting a note that has children.
+    /// The note acts as a folder, and we need to ensure it's empty before deletion.
     ///
     /// Key behaviors:
     /// - Only deletes empty directories (standard rmdir behavior)
-    /// - Deletes the most recent row (based on user_updated_time) if duplicates exist
+    /// - Deletes the most recent note (based on updated_at) if duplicates exist
     /// - Updates inode mappings to reflect the deletion
     /// - Required for proper file manager and shell integration
     fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
@@ -2177,26 +2176,30 @@ impl Filesystem for SqliteFS {
             }
         };
 
-        // Get parent folder ID from database
-        let parent_folder_id = match self.get_parent_folder_id(&parent_path) {
-            Ok(id) => id,
-            Err(_) => {
-                reply.error(ENOENT);
-                return;
+        // Get parent note ID from database (unified schema)
+        let parent_note_id = if parent_path == "/" {
+            None
+        } else {
+            match self.get_parent_folder_id(&parent_path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
+                }
             }
         };
 
-        // First, get the folder ID that we want to delete
-        let folder_to_delete_id: Result<String, rusqlite::Error> = self.db.query_row(
-            "SELECT id FROM folders
-             WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0
-             ORDER BY user_updated_time DESC
+        // First, get the note ID that represents the directory we want to delete
+        let note_to_delete_id: Result<String, rusqlite::Error> = self.db.query_row(
+            "SELECT id FROM notes
+             WHERE parent_id IS ?1 AND title = ?2
+             ORDER BY updated_at DESC
              LIMIT 1",
-            [&parent_folder_id, dirname],
+            rusqlite::params![parent_note_id, dirname],
             |row| row.get(0),
         );
 
-        let folder_id = match folder_to_delete_id {
+        let note_id = match note_to_delete_id {
             Ok(id) => id,
             Err(_) => {
                 reply.error(ENOENT);
@@ -2204,28 +2207,22 @@ impl Filesystem for SqliteFS {
             }
         };
 
-        // Check if the directory is empty (no child folders or notes)
-        let child_folders: Result<i64, rusqlite::Error> = self.db.query_row(
-            "SELECT COUNT(*) FROM folders WHERE parent_id = ?1 AND deleted_time = 0",
-            [&folder_id],
+        // Check if the directory is empty (no child notes)
+        let child_count: Result<i64, rusqlite::Error> = self.db.query_row(
+            "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+            [&note_id],
             |row| row.get(0),
         );
 
-        let child_notes: Result<i64, rusqlite::Error> = self.db.query_row(
-            "SELECT COUNT(*) FROM notes WHERE parent_id = ?1 AND deleted_time = 0",
-            [&folder_id],
-            |row| row.get(0),
-        );
-
-        match (child_folders, child_notes) {
-            (Ok(folder_count), Ok(note_count)) => {
-                if folder_count > 0 || note_count > 0 {
+        match child_count {
+            Ok(count) => {
+                if count > 0 {
                     // Directory is not empty
                     reply.error(libc::ENOTEMPTY);
                     return;
                 }
             }
-            _ => {
+            Err(_) => {
                 reply.error(libc::EIO);
                 return;
             }
@@ -2234,7 +2231,7 @@ impl Filesystem for SqliteFS {
         // Directory is empty, proceed with deletion
         let result = self
             .db
-            .execute("DELETE FROM folders WHERE id = ?1", [&folder_id]);
+            .execute("DELETE FROM notes WHERE id = ?1", [&note_id]);
 
         match result {
             Ok(rows_affected) => {
@@ -2249,6 +2246,14 @@ impl Filesystem for SqliteFS {
 
                     if let Some(inode) = self.inode_map.remove(&dir_path) {
                         self.reverse_inode_map.remove(&inode);
+                    }
+
+                    // Also remove any index file mappings for this directory
+                    for ext in Self::SUPPORTED_EXTENSIONS {
+                        let index_path = format!("{}/index.{}", dir_path, ext);
+                        if let Some(index_inode) = self.inode_map.remove(&index_path) {
+                            self.reverse_inode_map.remove(&index_inode);
+                        }
                     }
 
                     reply.ok();
