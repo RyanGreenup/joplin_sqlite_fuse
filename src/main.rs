@@ -306,6 +306,49 @@ impl SqliteFS {
             "txt"
         }
     }
+
+    /// Helper function to check if a filename is an editor temporary file
+    /// These files are created by editors like Neovim, Vim, and others
+    fn is_editor_temp_file(filename: &str) -> bool {
+        // Vim/Neovim swap files
+        if filename.starts_with('.') && filename.ends_with(".swp") {
+            return true;
+        }
+        if filename.starts_with('.') && filename.ends_with(".swo") {
+            return true;
+        }
+        if filename.starts_with('.') && filename.ends_with(".tmp") {
+            return true;
+        }
+        
+        // Vim backup files
+        if filename.ends_with('~') {
+            return true;
+        }
+        
+        // Emacs backup and auto-save files
+        if filename.starts_with('#') && filename.ends_with('#') {
+            return true;
+        }
+        if filename.starts_with(".#") {
+            return true;
+        }
+        
+        // VSCode temporary files
+        if filename.starts_with(".vscode") {
+            return true;
+        }
+        
+        // General temporary file patterns
+        if filename.contains(".tmp.") || filename.ends_with(".tmp") {
+            return true;
+        }
+        if filename.contains(".temp.") || filename.ends_with(".temp") {
+            return true;
+        }
+        
+        false
+    }
 }
 
 impl Filesystem for SqliteFS {
@@ -333,6 +376,37 @@ impl Filesystem for SqliteFS {
         } else {
             format!("{parent_path}/{name_str}")
         };
+
+        // Handle editor temporary files with synthetic attributes
+        if Self::is_editor_temp_file(name_str) {
+            let inode = self.get_or_create_inode(&full_path);
+            
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let attr = FileAttr {
+                ino: inode,
+                size: 0,
+                blocks: 0,
+                atime: UNIX_EPOCH + Duration::from_secs(now),
+                mtime: UNIX_EPOCH + Duration::from_secs(now),
+                ctime: UNIX_EPOCH + Duration::from_secs(now),
+                crtime: UNIX_EPOCH + Duration::from_secs(now),
+                kind: FileType::RegularFile,
+                perm: 0o644,
+                nlink: 1,
+                uid: 501,
+                gid: 20,
+                rdev: 0,
+                flags: 0,
+                blksize: 512,
+            };
+
+            reply.entry(&TTL, &attr, 0);
+            return;
+        }
 
         // Get parent note ID (None for root level)
         let parent_note_id = if parent_path == "/" {
@@ -1109,6 +1183,45 @@ impl Filesystem for SqliteFS {
                 return;
             }
         };
+
+        // Handle editor temporary files by creating them as regular empty files
+        // but don't store them in the database
+        if Self::is_editor_temp_file(file_name) {
+            // Create a temporary inode for editor files but don't persist to database
+            let full_path = if parent_path == "/" {
+                format!("/{file_name}")
+            } else {
+                format!("{parent_path}/{file_name}")
+            };
+            
+            let inode = self.get_or_create_inode(&full_path);
+            
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let attr = FileAttr {
+                ino: inode,
+                size: 0,
+                blocks: 0,
+                atime: UNIX_EPOCH + Duration::from_secs(now),
+                mtime: UNIX_EPOCH + Duration::from_secs(now),
+                ctime: UNIX_EPOCH + Duration::from_secs(now),
+                crtime: UNIX_EPOCH + Duration::from_secs(now),
+                kind: FileType::RegularFile,
+                perm: 0o644,
+                nlink: 1,
+                uid: 501,
+                gid: 20,
+                rdev: 0,
+                flags: 0,
+                blksize: 512,
+            };
+
+            reply.created(&TTL, &attr, 0, inode, 0);
+            return;
+        }
 
         // Extract title and extension from filename
         let (title, extension) = if let Some(dot_pos) = file_name.rfind('.') {
@@ -2118,9 +2231,10 @@ impl Filesystem for SqliteFS {
                         // Verify the extension matches the parent note's syntax
                         if requested_ext == expected_ext {
                             // Clear the content of the parent note instead of deleting it
+                            let now = Self::current_timestamp();
                             let result = self.db.execute(
-                                "UPDATE notes SET content = '', updated_at = datetime('now') WHERE id = ?1",
-                                [parent_id],
+                                "UPDATE notes SET content = '', updated_at = ?1 WHERE id = ?2",
+                                rusqlite::params!["", &now, parent_id],
                             );
 
                             match result {
@@ -2161,6 +2275,14 @@ impl Filesystem for SqliteFS {
                 }
                 return;
             }
+        }
+
+        // Handle special editor files (backup, swap, temporary files)
+        if Self::is_editor_temp_file(filename) {
+            // For editor temporary files, just reply OK without doing anything
+            // This allows editors like Neovim to create and delete backup files
+            reply.ok();
+            return;
         }
 
         // Handle regular file deletion
