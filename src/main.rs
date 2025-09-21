@@ -1,3 +1,5 @@
+use chrono::Utc;
+use chrono_tz::{Australia::Sydney, Tz};
 use clap::{Arg, ArgAction, Command};
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
@@ -11,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(1); // 1 second
+const TIMEZONE: Tz = Sydney; // Australia/Sydney timezone
 
 /// # Unified Notes Schema FUSE Filesystem
 ///
@@ -73,6 +76,14 @@ struct SqliteFS {
 }
 
 impl SqliteFS {
+    /// Helper function to get current timestamp in Australia/Sydney timezone
+    /// Returns formatted timestamp as string in "YYYY-MM-DD HH:MM:SS" format
+    fn current_timestamp() -> String {
+        let utc_now = Utc::now();
+        let sydney_time = utc_now.with_timezone(&TIMEZONE);
+        sydney_time.format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
     fn new(db_path: &str) -> Result<Self> {
         let db = Connection::open(db_path)?;
 
@@ -185,8 +196,8 @@ impl SqliteFS {
         // Generate new UUID for the note
         let note_id = Self::generate_uuid();
 
-        // Get current timestamp as string (matching the existing data format)
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        // Get current timestamp in Australia/Sydney timezone
+        let now = Self::current_timestamp();
 
         // Insert new note into database
         // Note: abstract field is not used by FUSE filesystem, left empty
@@ -1182,7 +1193,7 @@ impl Filesystem for SqliteFS {
                 };
 
                 // Update the parent note's content
-                let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                let now = Self::current_timestamp();
                 match self.db.execute(
                     "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
                     rusqlite::params![&new_content, &now, parent_id],
@@ -1265,7 +1276,7 @@ impl Filesystem for SqliteFS {
                 };
 
                 // Update the note's content
-                let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                let now = Self::current_timestamp();
                 match self.db.execute(
                     "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
                     rusqlite::params![&new_content, &now, &note_result.0],
@@ -1490,7 +1501,7 @@ impl Filesystem for SqliteFS {
                 let new_content = String::from_utf8_lossy(&content_bytes).to_string();
 
                 // Update parent note content
-                let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                let now = Self::current_timestamp();
                 if let Err(_) = self.db.execute(
                     "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
                     [&new_content, &now, &parent_note_id],
@@ -1587,7 +1598,7 @@ impl Filesystem for SqliteFS {
             let new_content = String::from_utf8_lossy(&content_bytes).to_string();
 
             // Update content in database
-            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let now = Self::current_timestamp();
             if let Err(_) = self.db.execute(
                 "UPDATE notes SET content = ?1, updated_at = ?2 WHERE parent_id IS ?3 AND title = ?4",
                 rusqlite::params![&new_content, &now, parent_note_id, title],
@@ -1785,8 +1796,8 @@ impl Filesystem for SqliteFS {
                             let new_ext = &new_name[new_dot_pos + 1..];
                             let new_extension = Self::normalize_extension(new_ext);
                             
-                            // Get current timestamp as string (matching existing data format)
-                            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                            // Get current timestamp in Australia/Sydney timezone
+                            let now = Self::current_timestamp();
                             
                             let update_result = self.db.execute(
                                 "UPDATE notes SET syntax = ?1, updated_at = ?2 WHERE id = ?3",
@@ -1898,8 +1909,8 @@ impl Filesystem for SqliteFS {
             }
         };
 
-        // Get current timestamp as string (matching existing data format)
-        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        // Get current timestamp in Australia/Sydney timezone
+        let now = Self::current_timestamp();
 
         // Update the note with new title, parent, and extension
         let update_result = self.db.execute(

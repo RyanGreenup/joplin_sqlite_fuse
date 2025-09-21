@@ -45,6 +45,11 @@ The user cares primarily with:
 - **Check code without building**: `cargo check`
 - **Run with logging**: `RUST_LOG=debug cargo run -- <mount_point>`
 
+## Configuration
+
+- **Timezone**: All timestamps are stored in Australia/Sydney timezone (configurable via `TIMEZONE` constant in `main.rs`)
+- **Extensions**: Supported file extensions are defined in `SUPPORTED_EXTENSIONS` constant
+
 ## Architecture
 
 The project follows a simple FUSE filesystem architecture:
