@@ -153,9 +153,6 @@ impl SqliteFS {
         Ok(current_parent_id.unwrap_or_default())
     }
 
-    fn strip_md_suffix(filename: &str) -> &str {
-        filename.strip_suffix(".md").unwrap_or(filename)
-    }
 
     /// Generate a UUID v4 string for database record IDs
     fn generate_uuid() -> String {
@@ -202,14 +199,23 @@ impl SqliteFS {
     }
 
     /// Helper function to get file extension from syntax
+    /// Aligned with TypeScript SYNTAX_OPTIONS
     fn get_extension_from_syntax(syntax: &str) -> &str {
         match syntax {
             "markdown" => "md",
+            "org" => "org", 
+            "html" => "html",
+            "jsx" => "jsx",
+            "ipynb" => "ipynb",
+            "dokuwiki" => "wiki",
+            "mediawiki" => "wiki",
+            "latex" => "tex",
+            "typst" => "typ",
+            // Additional common syntaxes not in the main list
             "python" => "py",
             "javascript" => "js",
             "typescript" => "ts",
             "rust" => "rs",
-            "html" => "html",
             "css" => "css",
             "json" => "json",
             "yaml" => "yml",
@@ -219,14 +225,22 @@ impl SqliteFS {
     }
 
     /// Helper function to get syntax from file extension
+    /// Aligned with TypeScript SYNTAX_OPTIONS
     fn get_syntax_from_extension(extension: &str) -> &str {
         match extension {
             "md" => "markdown",
+            "org" => "org",
+            "html" => "html",
+            "jsx" => "jsx",
+            "ipynb" => "ipynb",
+            "wiki" => "dokuwiki", // Default to dokuwiki for .wiki files
+            "tex" => "latex",
+            "typ" => "typst",
+            // Additional common extensions not in the main list
             "py" => "python",
             "js" => "javascript",
             "ts" => "typescript",
             "rs" => "rust",
-            "html" => "html",
             "css" => "css",
             "json" => "json",
             "yml" | "yaml" => "yaml",
@@ -1833,13 +1847,17 @@ impl Filesystem for SqliteFS {
         }
     }
 
-    /// Handle file deletion operations
-    /// This method is called when a file is deleted (e.g., using rm command).
-    /// It removes the corresponding row from the notes table in the database.
+    /// Handle file deletion operations (unified schema)
+    /// 
+    /// In the unified schema, file deletion has special considerations:
+    /// - Regular files: Delete the note if it has no children
+    /// - Index files: Clear the content of the parent note (but don't delete the note itself)
+    /// - Cannot delete notes that have children (they appear as directories)
     ///
     /// Key behaviors:
-    /// - Deletes the most recent row (based on user_updated_time) if duplicates exist
-    /// - Strips .md suffix from filename before database lookup
+    /// - Deletes the most recent row (based on updated_at) if duplicates exist
+    /// - Extracts title from filename using syntax-based extensions
+    /// - Handles index.{ext} files specially by clearing parent content
     /// - Updates inode mappings to reflect the deletion
     /// - Required for proper file manager and shell integration
     fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
@@ -1860,27 +1878,137 @@ impl Filesystem for SqliteFS {
             }
         };
 
-        // Get parent folder ID from database
-        let parent_folder_id = match self.get_parent_folder_id(&parent_path) {
-            Ok(id) => id,
+        // Get parent note ID (None for root level)
+        let parent_note_id = if parent_path == "/" {
+            None
+        } else {
+            match self.get_parent_folder_id(&parent_path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Handle special case for index files (index.{ext})
+        if filename.starts_with("index.") {
+            if let Some(parent_id) = &parent_note_id {
+                // Get the parent note's syntax to validate the extension
+                if let Ok(parent_syntax) = self.db.query_row(
+                    "SELECT syntax FROM notes WHERE id = ?1",
+                    [parent_id],
+                    |row| row.get::<_, String>(0)
+                ) {
+                    // Extract the requested extension
+                    if let Some(dot_pos) = filename.rfind('.') {
+                        let requested_ext = &filename[dot_pos + 1..];
+                        let expected_ext = Self::get_extension_from_syntax(&parent_syntax);
+                        
+                        // Verify the extension matches the parent note's syntax
+                        if requested_ext == expected_ext {
+                            // Clear the content of the parent note instead of deleting it
+                            let result = self.db.execute(
+                                "UPDATE notes SET content = '', updated_at = datetime('now') WHERE id = ?1",
+                                [parent_id],
+                            );
+
+                            match result {
+                                Ok(rows_affected) => {
+                                    if rows_affected > 0 {
+                                        // Successfully cleared content
+                                        // Remove from inode mappings
+                                        let file_path = if parent_path == "/" {
+                                            format!("/{filename}")
+                                        } else {
+                                            format!("{parent_path}/{filename}")
+                                        };
+
+                                        if let Some(inode) = self.inode_map.remove(&file_path) {
+                                            self.reverse_inode_map.remove(&inode);
+                                        }
+
+                                        reply.ok();
+                                    } else {
+                                        reply.error(ENOENT);
+                                    }
+                                }
+                                Err(_) => {
+                                    reply.error(libc::EIO);
+                                }
+                            }
+                        } else {
+                            // Extension doesn't match the note's syntax
+                            reply.error(ENOENT);
+                        }
+                    } else {
+                        // No extension in filename
+                        reply.error(ENOENT);
+                    }
+                } else {
+                    // Parent note not found
+                    reply.error(ENOENT);
+                }
+                return;
+            }
+        }
+
+        // Handle regular file deletion
+        // Extract title and extension from filename
+        let (title, requested_ext) = if let Some(dot_pos) = filename.rfind('.') {
+            (&filename[..dot_pos], Some(&filename[dot_pos + 1..]))
+        } else {
+            (filename, None)
+        };
+
+        // Find the note to delete and validate extension matches syntax
+        let note_query = "SELECT id, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
+        
+        let note_result = self.db.query_row(
+            note_query,
+            rusqlite::params![parent_note_id, title],
+            |row| {
+                let id: String = row.get(0)?;
+                let syntax: String = row.get(1)?;
+                Ok((id, syntax))
+            }
+        );
+
+        let (note_id, note_syntax) = match note_result {
+            Ok(result) => result,
             Err(_) => {
                 reply.error(ENOENT);
                 return;
             }
         };
 
-        // Strip .md suffix for database lookup
-        let title = Self::strip_md_suffix(filename);
+        // Validate that the requested extension matches the note's syntax
+        if let Some(ext) = requested_ext {
+            let expected_ext = Self::get_extension_from_syntax(&note_syntax);
+            if ext != expected_ext {
+                // Extension doesn't match the note's syntax
+                reply.error(ENOENT);
+                return;
+            }
+        }
 
-        // Delete the note with the most recent user_updated_time
+        // Check if this note has children (if so, it's a directory and cannot be deleted as a file)
+        let has_children = self.db.query_row(
+            "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+            [&note_id],
+            |row| row.get::<_, i64>(0)
+        ).unwrap_or(0) > 0;
+
+        if has_children {
+            // This note has children, so it's a directory - cannot delete as a file
+            reply.error(libc::EISDIR);
+            return;
+        }
+
+        // Delete the note (it's a leaf note with no children)
         let result = self.db.execute(
-            "DELETE FROM notes WHERE id = (
-                SELECT id FROM notes
-                WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0
-                ORDER BY user_updated_time DESC
-                LIMIT 1
-            )",
-            [&parent_folder_id, title],
+            "DELETE FROM notes WHERE id = ?1",
+            [&note_id],
         );
 
         match result {
@@ -1900,7 +2028,7 @@ impl Filesystem for SqliteFS {
 
                     reply.ok();
                 } else {
-                    // File not found
+                    // Should not happen since we just queried for it
                     reply.error(ENOENT);
                 }
             }
