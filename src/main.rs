@@ -479,72 +479,160 @@ impl Filesystem for SqliteFS {
             ("/", &path[..])
         };
 
-        // Query database for folders first
-        let folder_query = "SELECT id, title, created_time, updated_time, user_updated_time FROM folders WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
-
-        if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
-            if let Ok(mut stmt) = self.db.prepare(folder_query) {
-                if let Ok(folder_row) = stmt.query_row([&parent_folder_id, filename], |row| {
-                    let created_time: i64 = row.get(2)?;
-                    let updated_time: i64 = row.get(3)?;
-                    Ok((created_time, updated_time))
-                }) {
-                    let attr = FileAttr {
-                        ino,
-                        size: 0,
-                        blocks: 0,
-                        atime: UNIX_EPOCH + Duration::from_secs(folder_row.0 as u64),
-                        mtime: UNIX_EPOCH + Duration::from_secs(folder_row.1 as u64),
-                        ctime: UNIX_EPOCH + Duration::from_secs(folder_row.1 as u64),
-                        crtime: UNIX_EPOCH + Duration::from_secs(folder_row.0 as u64),
-                        kind: FileType::Directory,
-                        perm: 0o755,
-                        nlink: 2,
-                        uid: 501,
-                        gid: 20,
-                        rdev: 0,
-                        flags: 0,
-                        blksize: 512,
-                    };
-                    reply.attr(&TTL, &attr);
+        // Get parent note ID (None for root level)
+        let parent_note_id = if parent_path == "/" {
+            None
+        } else {
+            match self.get_parent_folder_id(parent_path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
                     return;
+                }
+            }
+        };
+
+        // Handle special case for index files (index.{ext})
+        if filename.starts_with("index.") {
+            if let Some(parent_id) = &parent_note_id {
+                // Look up the parent note to get its content via index file
+                if let Ok(note_result) = self.db.query_row(
+                    "SELECT id, title, content, syntax, created_at, updated_at FROM notes WHERE id = ?1",
+                    [parent_id],
+                    |row| {
+                        let content: String = row.get(2)?;
+                        let syntax: String = row.get(3)?;
+                        let created_at: String = row.get(4)?;
+                        let updated_at: String = row.get(5)?;
+                        Ok((content, syntax, created_at, updated_at))
+                    }
+                ) {
+                    let expected_ext = Self::get_extension_from_syntax(&note_result.1);
+                    let expected_index = format!("index.{}", expected_ext);
+                    
+                    if filename == expected_index {
+                        let content_size = note_result.0.len();
+                        let attr = FileAttr {
+                            ino,
+                            size: content_size as u64,
+                            blocks: content_size.div_ceil(512) as u64,
+                            atime: UNIX_EPOCH,  // TODO: Parse created_at
+                            mtime: UNIX_EPOCH,  // TODO: Parse updated_at
+                            ctime: UNIX_EPOCH,  // TODO: Parse updated_at
+                            crtime: UNIX_EPOCH, // TODO: Parse created_at
+                            kind: FileType::RegularFile,
+                            perm: 0o644,
+                            nlink: 1,
+                            uid: 501,
+                            gid: 20,
+                            rdev: 0,
+                            flags: 0,
+                            blksize: 512,
+                        };
+                        reply.attr(&TTL, &attr);
+                        return;
+                    }
                 }
             }
         }
 
-        // Query database for notes (strip .md suffix when looking up in database)
-        let note_query = "SELECT id, title, body, created_time, updated_time, user_updated_time FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
+        // Query database for notes (unified schema)
+        let note_query = "SELECT id, title, content, syntax, created_at, updated_at FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
+        
+        // Try exact title match first (for directories)
+        if let Ok(note_result) = self.db.query_row(
+            note_query,
+            rusqlite::params![parent_note_id, filename],
+            |row| {
+                let id: String = row.get(0)?;
+                let content: String = row.get(2)?;
+                let syntax: String = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let updated_at: String = row.get(5)?;
+                Ok((id, content, syntax, created_at, updated_at))
+            }
+        ) {
+            // Check if this note has children (making it a directory)
+            let has_children = self.db.query_row(
+                "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                [&note_result.0],
+                |row| row.get::<_, i64>(0)
+            ).unwrap_or(0) > 0;
 
-        if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
-            if let Ok(mut stmt) = self.db.prepare(note_query) {
-                // Strip .md suffix when querying the database
-                let db_title = Self::strip_md_suffix(filename);
-                if let Ok(note_row) = stmt.query_row([&parent_folder_id, db_title], |row| {
-                    let body: String = row.get(2)?;
-                    let created_time: i64 = row.get(3)?;
-                    let updated_time: i64 = row.get(4)?;
-                    Ok((body, created_time, updated_time))
-                }) {
-                    let content_size = note_row.0.len();
-                    let attr = FileAttr {
-                        ino,
-                        size: content_size as u64,
-                        blocks: content_size.div_ceil(512) as u64,
-                        atime: UNIX_EPOCH + Duration::from_secs(note_row.1 as u64),
-                        mtime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
-                        ctime: UNIX_EPOCH + Duration::from_secs(note_row.2 as u64),
-                        crtime: UNIX_EPOCH + Duration::from_secs(note_row.1 as u64),
-                        kind: FileType::RegularFile,
-                        perm: 0o644,
-                        nlink: 1,
-                        uid: 501,
-                        gid: 20,
-                        rdev: 0,
-                        flags: 0,
-                        blksize: 512,
-                    };
-                    reply.attr(&TTL, &attr);
-                    return;
+            if has_children {
+                // This note has children, so it's a directory
+                let attr = FileAttr {
+                    ino,
+                    size: 0,
+                    blocks: 0,
+                    atime: UNIX_EPOCH,  // TODO: Parse created_at
+                    mtime: UNIX_EPOCH,  // TODO: Parse updated_at
+                    ctime: UNIX_EPOCH,  // TODO: Parse updated_at
+                    crtime: UNIX_EPOCH, // TODO: Parse created_at
+                    kind: FileType::Directory,
+                    perm: 0o755,
+                    nlink: 2,
+                    uid: 501,
+                    gid: 20,
+                    rdev: 0,
+                    flags: 0,
+                    blksize: 512,
+                };
+                reply.attr(&TTL, &attr);
+                return;
+            }
+        }
+
+        // Try stripping file extension and matching title (for files)
+        if let Some(dot_pos) = filename.rfind('.') {
+            let title_without_ext = &filename[..dot_pos];
+            let requested_ext = &filename[dot_pos + 1..];
+            
+            if let Ok(note_result) = self.db.query_row(
+                note_query,
+                rusqlite::params![parent_note_id, title_without_ext],
+                |row| {
+                    let id: String = row.get(0)?;
+                    let content: String = row.get(2)?;
+                    let syntax: String = row.get(3)?;
+                    let created_at: String = row.get(4)?;
+                    let updated_at: String = row.get(5)?;
+                    Ok((id, content, syntax, created_at, updated_at))
+                }
+            ) {
+                // Check if this note has children
+                let has_children = self.db.query_row(
+                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                    [&note_result.0],
+                    |row| row.get::<_, i64>(0)
+                ).unwrap_or(0) > 0;
+
+                if !has_children {
+                    // This note has no children, so it's a file
+                    // Verify the extension matches the syntax
+                    let expected_ext = Self::get_extension_from_syntax(&note_result.2);
+                    if requested_ext == expected_ext {
+                        let content_size = note_result.1.len();
+                        let attr = FileAttr {
+                            ino,
+                            size: content_size as u64,
+                            blocks: content_size.div_ceil(512) as u64,
+                            atime: UNIX_EPOCH,  // TODO: Parse created_at
+                            mtime: UNIX_EPOCH,  // TODO: Parse updated_at
+                            ctime: UNIX_EPOCH,  // TODO: Parse updated_at
+                            crtime: UNIX_EPOCH, // TODO: Parse created_at
+                            kind: FileType::RegularFile,
+                            perm: 0o644,
+                            nlink: 1,
+                            uid: 501,
+                            gid: 20,
+                            rdev: 0,
+                            flags: 0,
+                            blksize: 512,
+                        };
+                        reply.attr(&TTL, &attr);
+                        return;
+                    }
                 }
             }
         }
