@@ -203,12 +203,12 @@ impl SqliteFS {
     fn get_extension_from_syntax(syntax: &str) -> &str {
         match syntax {
             "markdown" => "md",
-            "org" => "org", 
+            "org" => "org",
             "html" => "html",
             "jsx" => "jsx",
             "ipynb" => "ipynb",
-            "dokuwiki" => "wiki",
-            "mediawiki" => "wiki",
+            "dokuwiki" => "dw",
+            "mediawiki" => "mw",
             "latex" => "tex",
             "typst" => "typ",
             // Additional common syntaxes not in the main list
@@ -233,7 +233,8 @@ impl SqliteFS {
             "html" => "html",
             "jsx" => "jsx",
             "ipynb" => "ipynb",
-            "wiki" => "dokuwiki", // Default to dokuwiki for .wiki files
+            "dw" => "dokuwiki",
+            "mw" => "dokuwiki",
             "tex" => "latex",
             "typ" => "typst",
             // Additional common extensions not in the main list
@@ -1087,7 +1088,7 @@ impl Filesystem for SqliteFS {
     }
 
     /// Handle file write operations (unified schema)
-    /// 
+    ///
     /// This method handles writing to both regular files and index files in the unified schema.
     /// The content is immediately written to the database's 'content' field.
     ///
@@ -1206,7 +1207,7 @@ impl Filesystem for SqliteFS {
 
             // Look up the note by title (without extension)
             let note_query = "SELECT id, content, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
-            
+
             if let Ok(note_result) = self.db.query_row(
                 note_query,
                 rusqlite::params![parent_note_id, title_without_ext],
@@ -1286,7 +1287,7 @@ impl Filesystem for SqliteFS {
     }
 
     /// Handle file opening operations (unified schema)
-    /// 
+    ///
     /// This method verifies that a file exists before allowing it to be opened.
     /// In the unified schema, this handles both regular files (leaf notes) and
     /// index files (content of parent notes that have children).
@@ -1362,7 +1363,7 @@ impl Filesystem for SqliteFS {
 
         // Look up the note in the database
         let note_query = "SELECT id, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
-        
+
         if let Ok((note_id, syntax)) = self.db.query_row(
             note_query,
             rusqlite::params![parent_note_id, title],
@@ -1402,7 +1403,7 @@ impl Filesystem for SqliteFS {
     }
 
     /// Handle file attribute setting operations (unified schema)
-    /// 
+    ///
     /// In the unified schema, this handles both regular files and index files.
     /// Index files (index.{ext}) provide access to parent note content when
     /// a note has children and becomes a directory.
@@ -1694,13 +1695,13 @@ impl Filesystem for SqliteFS {
     }
 
     /// Handle file and directory renaming operations (unified schema)
-    /// 
+    ///
     /// In the unified schema, renaming works on notes regardless of whether they're
     /// currently presented as files or directories. The operation handles:
     /// - Title changes (with proper extension handling)
     /// - Moving between directories (parent_id changes)
     /// - Updating timestamps
-    /// 
+    ///
     /// Key behaviors:
     /// - Single table operation (notes table only)
     /// - Handles both file and directory renaming automatically
@@ -1848,7 +1849,7 @@ impl Filesystem for SqliteFS {
     }
 
     /// Handle file deletion operations (unified schema)
-    /// 
+    ///
     /// In the unified schema, file deletion has special considerations:
     /// - Regular files: Delete the note if it has no children
     /// - Index files: Clear the content of the parent note (but don't delete the note itself)
@@ -1904,7 +1905,7 @@ impl Filesystem for SqliteFS {
                     if let Some(dot_pos) = filename.rfind('.') {
                         let requested_ext = &filename[dot_pos + 1..];
                         let expected_ext = Self::get_extension_from_syntax(&parent_syntax);
-                        
+
                         // Verify the extension matches the parent note's syntax
                         if requested_ext == expected_ext {
                             // Clear the content of the parent note instead of deleting it
@@ -1963,7 +1964,7 @@ impl Filesystem for SqliteFS {
 
         // Find the note to delete and validate extension matches syntax
         let note_query = "SELECT id, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
-        
+
         let note_result = self.db.query_row(
             note_query,
             rusqlite::params![parent_note_id, title],
