@@ -1271,9 +1271,11 @@ impl Filesystem for SqliteFS {
         reply.error(ENOENT);
     }
 
-    /// Handle file opening operations
-    /// This method is called when editors or applications use open() system call
-    /// to open existing files for reading or writing
+    /// Handle file opening operations (unified schema)
+    /// 
+    /// This method verifies that a file exists before allowing it to be opened.
+    /// In the unified schema, this handles both regular files (leaf notes) and
+    /// index files (content of parent notes that have children).
     fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
         // Verify that the inode exists and corresponds to a valid file
         let path = match self.get_path_from_inode(ino) {
@@ -1293,41 +1295,107 @@ impl Filesystem for SqliteFS {
             ("/", &path[..])
         };
 
-        // Verify the file exists in the database
-        let parent_folder_id = match self.get_parent_folder_id(parent_path) {
-            Ok(id) => id,
-            Err(_) => {
-                reply.error(ENOENT);
-                return;
+        // Get parent note ID (None for root level)
+        let parent_note_id = if parent_path == "/" {
+            None
+        } else {
+            match self.get_parent_folder_id(parent_path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
+                }
             }
         };
 
-        let db_title = Self::strip_md_suffix(filename);
+        // Handle special case for index files (index.{ext})
+        if filename.starts_with("index.") {
+            if let Some(parent_id) = &parent_note_id {
+                // Check if the parent note exists and verify extension matches syntax
+                let note_exists = self.db.query_row(
+                    "SELECT syntax FROM notes WHERE id = ?1",
+                    [parent_id],
+                    |row| {
+                        let syntax: String = row.get(0)?;
+                        let expected_ext = Self::get_extension_from_syntax(&syntax);
+                        let expected_index = format!("index.{}", expected_ext);
+                        Ok(filename == expected_index)
+                    }
+                ).unwrap_or(false);
 
-        // Check if the note exists in the database
-        let note_exists = self.db.query_row(
-            "SELECT 1 FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
-            [&parent_folder_id, db_title],
-            |_| Ok(true)
-        ).unwrap_or(false);
+                if note_exists {
+                    reply.opened(ino, 0);
+                } else {
+                    reply.error(ENOENT);
+                }
+                return;
+            } else {
+                // Index file at root level doesn't make sense
+                reply.error(ENOENT);
+                return;
+            }
+        }
 
-        if note_exists {
-            // File exists, return success with the inode as file handle
-            // Using the inode as file handle simplifies file handle management
-            reply.opened(ino, 0);
+        // Handle regular files - extract title and verify extension
+        let (title, requested_ext) = if let Some(dot_pos) = filename.rfind('.') {
+            let title = &filename[..dot_pos];
+            let ext = &filename[dot_pos + 1..];
+            (title, Some(ext))
         } else {
-            // File doesn't exist in database
+            // No extension - this shouldn't happen for files in our schema
+            (filename, None)
+        };
+
+        // Look up the note in the database
+        let note_query = "SELECT id, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
+        
+        if let Ok((note_id, syntax)) = self.db.query_row(
+            note_query,
+            rusqlite::params![parent_note_id, title],
+            |row| {
+                let id: String = row.get(0)?;
+                let syntax: String = row.get(1)?;
+                Ok((id, syntax))
+            }
+        ) {
+            // Verify the file extension matches the note's syntax
+            if let Some(req_ext) = requested_ext {
+                let expected_ext = Self::get_extension_from_syntax(&syntax);
+                if req_ext != expected_ext {
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+
+            // Check if this note has children (making it a directory)
+            let has_children = self.db.query_row(
+                "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                [&note_id],
+                |row| row.get::<_, i64>(0)
+            ).unwrap_or(0) > 0;
+
+            if has_children {
+                // This note has children, so it should be accessed as a directory, not a file
+                reply.error(ENOENT);
+            } else {
+                // This is a leaf note (file), allow opening
+                reply.opened(ino, 0);
+            }
+        } else {
+            // Note doesn't exist in database
             reply.error(ENOENT);
         }
     }
 
-    /// Handle file attribute setting operations
-    /// This method is called when editors or applications try to set file attributes
-    /// such as timestamps, file size, permissions, etc. Many editors require this
-    /// operation to function properly.
+    /// Handle file attribute setting operations (unified schema)
+    /// 
+    /// In the unified schema, this handles both regular files and index files.
+    /// Index files (index.{ext}) provide access to parent note content when
+    /// a note has children and becomes a directory.
     ///
     /// Key behaviors:
     /// - Handles size changes (truncation/extension of file content)
+    /// - Supports both regular files ({title}.{ext}) and index files (index.{ext})
     /// - Updates timestamps in the database when modified
     /// - Validates that the file exists before making changes
     /// - Returns updated file attributes after successful changes
@@ -1367,23 +1435,123 @@ impl Filesystem for SqliteFS {
             ("/", &path[..])
         };
 
-        // Get the parent folder ID and strip .md suffix for database lookup
-        let parent_folder_id = match self.get_parent_folder_id(parent_path) {
-            Ok(id) => id,
-            Err(_) => {
-                reply.error(ENOENT);
+        // Handle index files (index.{ext}) - these access parent note content
+        if filename.starts_with("index.") {
+            let parent_note_id = if parent_path == "/" {
+                reply.error(ENOENT); // Root can't have index file
                 return;
+            } else {
+                match self.get_parent_folder_id(parent_path) {
+                    Ok(id) => id,
+                    Err(_) => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                }
+            };
+
+            // Handle size changes for index file (modifies parent note content)
+            if let Some(new_size) = size {
+                let current_content = match self.db.query_row(
+                    "SELECT content FROM notes WHERE id = ?1",
+                    [&parent_note_id],
+                    |row| row.get::<_, String>(0)
+                ) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+
+                let mut content_bytes = current_content.into_bytes();
+                let target_size = new_size as usize;
+
+                // Adjust content size based on target
+                if target_size < content_bytes.len() {
+                    content_bytes.truncate(target_size);
+                } else if target_size > content_bytes.len() {
+                    content_bytes.resize(target_size, 0);
+                }
+
+                let new_content = String::from_utf8_lossy(&content_bytes).to_string();
+
+                // Update parent note content
+                let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                if let Err(_) = self.db.execute(
+                    "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
+                    [&new_content, &now, &parent_note_id],
+                ) {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            }
+
+            // Get current parent note information for returning attributes
+            let (content_size, _created_at, _updated_at) = match self.db.query_row(
+                "SELECT content, created_at, updated_at FROM notes WHERE id = ?1",
+                [&parent_note_id],
+                |row| {
+                    let content: String = row.get(0)?;
+                    let created: String = row.get(1)?;
+                    let updated: String = row.get(2)?;
+                    Ok((content.len(), created, updated))
+                }
+            ) {
+                Ok(data) => data,
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+
+            let attr = FileAttr {
+                ino,
+                size: content_size as u64,
+                blocks: content_size.div_ceil(512) as u64,
+                atime: UNIX_EPOCH,  // TODO: Parse created_at string
+                mtime: UNIX_EPOCH,  // TODO: Parse updated_at string
+                ctime: UNIX_EPOCH,  // TODO: Parse updated_at string
+                crtime: UNIX_EPOCH, // TODO: Parse created_at string
+                kind: FileType::RegularFile,
+                perm: mode.unwrap_or(0o644) as u16,
+                nlink: 1,
+                uid: uid.unwrap_or(501),
+                gid: gid.unwrap_or(20),
+                rdev: 0,
+                flags: 0,
+                blksize: 512,
+            };
+
+            reply.attr(&TTL, &attr);
+            return;
+        }
+
+        // Handle regular files - strip extension and find note by title
+        let parent_note_id = if parent_path == "/" {
+            None
+        } else {
+            match self.get_parent_folder_id(parent_path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
+                }
             }
         };
 
-        let db_title = Self::strip_md_suffix(filename);
+        // Extract title from filename (remove extension)
+        let title = if let Some(dot_pos) = filename.rfind('.') {
+            &filename[..dot_pos]
+        } else {
+            filename
+        };
 
         // Handle size changes (file truncation/extension)
         if let Some(new_size) = size {
-            // Get current content to modify its size
             let current_content = match self.db.query_row(
-                "SELECT body FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
-                [&parent_folder_id, db_title],
+                "SELECT content FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1",
+                rusqlite::params![parent_note_id, title],
                 |row| row.get::<_, String>(0)
             ) {
                 Ok(content) => content,
@@ -1394,29 +1562,22 @@ impl Filesystem for SqliteFS {
             };
 
             let mut content_bytes = current_content.into_bytes();
-            let current_size = content_bytes.len();
             let target_size = new_size as usize;
 
             // Adjust content size based on target
-            if target_size < current_size {
-                // Truncate content
+            if target_size < content_bytes.len() {
                 content_bytes.truncate(target_size);
-            } else if target_size > current_size {
-                // Extend content with null bytes
+            } else if target_size > content_bytes.len() {
                 content_bytes.resize(target_size, 0);
             }
 
             let new_content = String::from_utf8_lossy(&content_bytes).to_string();
 
             // Update content in database
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-
+            let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             if let Err(_) = self.db.execute(
-                "UPDATE notes SET body = ?1, updated_time = ?2, user_updated_time = ?3 WHERE parent_id = ?4 AND title = ?5 AND deleted_time = 0",
-                [&new_content, &now.to_string(), &now.to_string(), &parent_folder_id, db_title],
+                "UPDATE notes SET content = ?1, updated_at = ?2 WHERE parent_id IS ?3 AND title = ?4",
+                rusqlite::params![&new_content, &now, parent_note_id, title],
             ) {
                 reply.error(libc::EIO);
                 return;
@@ -1424,14 +1585,14 @@ impl Filesystem for SqliteFS {
         }
 
         // Get current file information for returning updated attributes
-        let (content_size, created_time, updated_time) = match self.db.query_row(
-            "SELECT body, created_time, updated_time FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
-            [&parent_folder_id, db_title],
+        let (content_size, _created_at, _updated_at) = match self.db.query_row(
+            "SELECT content, created_at, updated_at FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1",
+            rusqlite::params![parent_note_id, title],
             |row| {
-                let body: String = row.get(0)?;
-                let created: i64 = row.get(1)?;
-                let updated: i64 = row.get(2)?;
-                Ok((body.len(), created, updated))
+                let content: String = row.get(0)?;
+                let created: String = row.get(1)?;
+                let updated: String = row.get(2)?;
+                Ok((content.len(), created, updated))
             }
         ) {
             Ok(data) => data,
@@ -1446,10 +1607,10 @@ impl Filesystem for SqliteFS {
             ino,
             size: content_size as u64,
             blocks: content_size.div_ceil(512) as u64,
-            atime: UNIX_EPOCH + Duration::from_secs(created_time as u64),
-            mtime: UNIX_EPOCH + Duration::from_secs(updated_time as u64),
-            ctime: UNIX_EPOCH + Duration::from_secs(updated_time as u64),
-            crtime: UNIX_EPOCH + Duration::from_secs(created_time as u64),
+            atime: UNIX_EPOCH,  // TODO: Parse created_at string
+            mtime: UNIX_EPOCH,  // TODO: Parse updated_at string
+            ctime: UNIX_EPOCH,  // TODO: Parse updated_at string
+            crtime: UNIX_EPOCH, // TODO: Parse created_at string
             kind: FileType::RegularFile,
             perm: mode.unwrap_or(0o644) as u16,
             nlink: 1,
