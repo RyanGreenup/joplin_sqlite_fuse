@@ -12,6 +12,59 @@ use uuid::Uuid;
 
 const TTL: Duration = Duration::from_secs(1); // 1 second
 
+/// # Unified Notes Schema FUSE Filesystem
+/// 
+/// This filesystem implements a unified schema where both files and folders are represented
+/// as notes in a single `notes` table. The distinction between files and folders is determined
+/// dynamically based on whether a note has children.
+/// 
+/// ## Schema Structure
+/// ```sql
+/// CREATE TABLE notes (
+///     id TEXT PRIMARY KEY,
+///     title TEXT NOT NULL,
+///     abstract TEXT,
+///     content TEXT NOT NULL,
+///     syntax TEXT NOT NULL DEFAULT 'markdown',
+///     parent_id TEXT,
+///     user_id TEXT NOT NULL,
+///     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+///     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+///     FOREIGN KEY (parent_id) REFERENCES notes(id) ON DELETE CASCADE
+/// );
+/// ```
+/// 
+/// ## File/Folder Behavior
+/// 
+/// ### Files (Leaf Notes)
+/// - A note with **no children** is presented as a **file**
+/// - Filename: `{title}.{extension}` (extension based on `syntax` field)
+/// - Content: Direct mapping from the `content` field
+/// - Example: Note titled "Python Basics" → `Python Basics.md`
+/// 
+/// ### Folders (Parent Notes)
+/// - A note with **children** is presented as a **directory**
+/// - Directory name: `{title}` (no extension)
+/// - The note's own content is accessible as `{title}/index.{extension}`
+/// - Child notes appear as files/subdirectories within this directory
+/// 
+/// ### Dynamic Transformation Example
+/// ```
+/// Initial state:
+/// - Note: "Python" (content: "Python programming guide") → File: `Python.md`
+/// 
+/// After adding child "Pandas":
+/// - Note: "Python" → Directory: `Python/`
+/// - Python's content → File: `Python/index.md`
+/// - Child note: "Pandas" → File: `Python/Pandas.md`
+/// ```
+/// 
+/// ## Implementation Notes
+/// - Root directory has `parent_id = NULL`
+/// - File extensions determined by `syntax` field (markdown → .md, etc.)
+/// - Filesystem operations must handle dynamic file↔folder transitions
+/// - Index files (`index.{ext}`) provide access to parent note content
+/// - Ordering by `updated_at DESC` for conflict resolution
 struct SqliteFS {
     db: Connection,
     inode_map: HashMap<String, u64>,
