@@ -262,6 +262,21 @@ The filesystem implements all standard FUSE operations:
 
   This doesn't work with `zeditor` at all yet so `#TODO`.
 
+4. LibFuse not available
+
+  On Void Linux I had to symlink my version (newer) to that version (older)
+
+  ```
+
+  target/debug/sqlite_fuse: error while loading shared libraries: libfuse3.so.4: cannot open shared object file: No such file or directory
+
+  ```
+
+5. Distrobox and Docker Containers
+  The fuse mount will be available within a cointainer, if mounted in there, but not outside.
+
+  If mounted by the host, it will not be visible within the container.
+
 
 
 ### Debugging
