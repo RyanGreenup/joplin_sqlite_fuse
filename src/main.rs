@@ -143,7 +143,7 @@ impl SqliteFS {
             // In the new schema, folders are represented as notes without content
             let folder_id: String = self.db.query_row(
                 "SELECT id FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1",
-                [current_parent_id.as_deref(), part],
+                rusqlite::params![current_parent_id.as_deref(), part],
                 |row| row.get(0)
             )?;
 
