@@ -13,11 +13,11 @@ use uuid::Uuid;
 const TTL: Duration = Duration::from_secs(1); // 1 second
 
 /// # Unified Notes Schema FUSE Filesystem
-/// 
+///
 /// This filesystem implements a unified schema where both files and folders are represented
 /// as notes in a single `notes` table. The distinction between files and folders is determined
 /// dynamically based on whether a note has children.
-/// 
+///
 /// ## Schema Structure
 /// ```sql
 /// CREATE TABLE notes (
@@ -33,32 +33,32 @@ const TTL: Duration = Duration::from_secs(1); // 1 second
 ///     FOREIGN KEY (parent_id) REFERENCES notes(id) ON DELETE CASCADE
 /// );
 /// ```
-/// 
+///
 /// ## File/Folder Behavior
-/// 
+///
 /// ### Files (Leaf Notes)
 /// - A note with **no children** is presented as a **file**
 /// - Filename: `{title}.{extension}` (extension based on `syntax` field)
 /// - Content: Direct mapping from the `content` field
 /// - Example: Note titled "Python Basics" → `Python Basics.md`
-/// 
+///
 /// ### Folders (Parent Notes)
 /// - A note with **children** is presented as a **directory**
 /// - Directory name: `{title}` (no extension)
 /// - The note's own content is accessible as `{title}/index.{extension}`
 /// - Child notes appear as files/subdirectories within this directory
-/// 
+///
 /// ### Dynamic Transformation Example
 /// ```
 /// Initial state:
 /// - Note: "Python" (content: "Python programming guide") → File: `Python.md`
-/// 
+///
 /// After adding child "Pandas":
 /// - Note: "Python" → Directory: `Python/`
 /// - Python's content → File: `Python/index.md`
 /// - Child note: "Pandas" → File: `Python/Pandas.md`
 /// ```
-/// 
+///
 /// ## Implementation Notes
 /// - Root directory has `parent_id = NULL`
 /// - File extensions determined by `syntax` field (markdown → .md, etc.)
@@ -157,14 +157,6 @@ impl SqliteFS {
         filename.strip_suffix(".md").unwrap_or(filename)
     }
 
-    fn add_md_suffix(title: &str) -> String {
-        if title.ends_with(".md") {
-            title.to_string()
-        } else {
-            format!("{title}.md")
-        }
-    }
-
     /// Generate a UUID v4 string for database record IDs
     fn generate_uuid() -> String {
         Uuid::new_v4().to_string()
@@ -230,7 +222,7 @@ impl SqliteFS {
     fn get_syntax_from_extension(extension: &str) -> &str {
         match extension {
             "md" => "markdown",
-            "py" => "python", 
+            "py" => "python",
             "js" => "javascript",
             "ts" => "typescript",
             "rs" => "rust",
@@ -301,11 +293,11 @@ impl Filesystem for SqliteFS {
                 ) {
                     let expected_ext = Self::get_extension_from_syntax(&note_result.2);
                     let expected_index = format!("index.{}", expected_ext);
-                    
+
                     if name_str == expected_index {
                         let inode = self.get_or_create_inode(&full_path);
                         let content_size = note_result.1.len();
-                        
+
                         // TODO: Parse timestamp strings properly
                         let attr = FileAttr {
                             ino: inode,
@@ -333,7 +325,7 @@ impl Filesystem for SqliteFS {
 
         // Look for a note with matching title (unified schema)
         let note_query = "SELECT id, title, content, syntax, created_at, updated_at FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
-        
+
         // Try exact title match first (for directories)
         if let Ok(note_result) = self.db.query_row(
             note_query,
@@ -383,7 +375,7 @@ impl Filesystem for SqliteFS {
         if let Some(dot_pos) = name_str.rfind('.') {
             let title_without_ext = &name_str[..dot_pos];
             let requested_ext = &name_str[dot_pos + 1..];
-            
+
             if let Ok(note_result) = self.db.query_row(
                 note_query,
                 rusqlite::params![parent_note_id, title_without_ext],
@@ -410,7 +402,7 @@ impl Filesystem for SqliteFS {
                     if requested_ext == expected_ext {
                         let inode = self.get_or_create_inode(&full_path);
                         let content_size = note_result.1.len();
-                        
+
                         let attr = FileAttr {
                             ino: inode,
                             size: content_size as u64,
@@ -509,7 +501,7 @@ impl Filesystem for SqliteFS {
                 ) {
                     let expected_ext = Self::get_extension_from_syntax(&note_result.1);
                     let expected_index = format!("index.{}", expected_ext);
-                    
+
                     if filename == expected_index {
                         let content_size = note_result.0.len();
                         let attr = FileAttr {
@@ -538,7 +530,7 @@ impl Filesystem for SqliteFS {
 
         // Query database for notes (unified schema)
         let note_query = "SELECT id, title, content, syntax, created_at, updated_at FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
-        
+
         // Try exact title match first (for directories)
         if let Ok(note_result) = self.db.query_row(
             note_query,
@@ -587,7 +579,7 @@ impl Filesystem for SqliteFS {
         if let Some(dot_pos) = filename.rfind('.') {
             let title_without_ext = &filename[..dot_pos];
             let requested_ext = &filename[dot_pos + 1..];
-            
+
             if let Ok(note_result) = self.db.query_row(
                 note_query,
                 rusqlite::params![parent_note_id, title_without_ext],
@@ -696,7 +688,7 @@ impl Filesystem for SqliteFS {
                 ) {
                     let expected_ext = Self::get_extension_from_syntax(&content.1);
                     let expected_index = format!("index.{}", expected_ext);
-                    
+
                     if filename == expected_index {
                         let content_bytes = content.0.as_bytes();
                         let start = offset as usize;
@@ -713,12 +705,12 @@ impl Filesystem for SqliteFS {
 
         // Query database for note content (unified schema)
         let note_query = "SELECT id, content, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
-        
+
         // Try stripping file extension and matching title (for files)
         if let Some(dot_pos) = filename.rfind('.') {
             let title_without_ext = &filename[..dot_pos];
             let requested_ext = &filename[dot_pos + 1..];
-            
+
             if let Ok(note_result) = self.db.query_row(
                 note_query,
                 rusqlite::params![parent_note_id, title_without_ext],
@@ -778,30 +770,32 @@ impl Filesystem for SqliteFS {
             (1, FileType::Directory, "..".to_string()),
         ];
 
-        // Get the parent folder ID for this directory
-        let parent_folder_id = match self.get_parent_folder_id(&path) {
-            Ok(id) => id,
-            Err(_) => {
-                reply.error(ENOENT);
-                return;
+        // Get the note ID for this directory (unified schema)
+        let current_note_id = if path == "/" {
+            None
+        } else {
+            match self.get_parent_folder_id(&path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
+                }
             }
         };
 
-        // Query folders
-        let folder_query = "SELECT id, title FROM folders WHERE parent_id = ?1 AND deleted_time = 0 ORDER BY user_updated_time DESC";
-        let folder_titles = {
-            if let Ok(mut stmt) = self.db.prepare(folder_query) {
-                if let Ok(rows) = stmt.query_map([&parent_folder_id], |row| {
+        // Query all child notes under this directory
+        let child_query = "SELECT id, title, syntax FROM notes WHERE parent_id IS ?1 ORDER BY updated_at DESC";
+
+        // First, collect all the child note data
+        let child_notes: Vec<(String, String, String)> = {
+            if let Ok(mut stmt) = self.db.prepare(child_query) {
+                if let Ok(rows) = stmt.query_map([current_note_id.as_deref()], |row| {
+                    let id: String = row.get(0)?;
                     let title: String = row.get(1)?;
-                    Ok(title)
+                    let syntax: String = row.get(2)?;
+                    Ok((id, title, syntax))
                 }) {
-                    let mut titles = Vec::new();
-                    for row in rows {
-                        if let Ok(title) = row {
-                            titles.push(title);
-                        }
-                    }
-                    titles
+                    rows.filter_map(|row| row.ok()).collect()
                 } else {
                     Vec::new()
                 }
@@ -810,52 +804,78 @@ impl Filesystem for SqliteFS {
             }
         };
 
-        for title in folder_titles {
-            let full_path = if path == "/" {
-                format!("/{title}")
-            } else {
-                format!("{path}/{title}")
-            };
-            let inode = self.get_or_create_inode(&full_path);
-            entries.push((inode, FileType::Directory, title));
-        }
+        // Now process the collected data without holding database borrows
+        for (note_id, title, syntax) in child_notes {
+            // Check if this note has children to determine if it's a directory
+            let has_children = self.db.query_row(
+                "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                [&note_id],
+                |row| row.get::<_, i64>(0)
+            ).unwrap_or(0) > 0;
 
-        // Query notes
-        let note_query = "SELECT id, title FROM notes WHERE parent_id = ?1 AND deleted_time = 0 ORDER BY user_updated_time DESC";
-        let note_titles = {
-            if let Ok(mut stmt) = self.db.prepare(note_query) {
-                if let Ok(rows) = stmt.query_map([&parent_folder_id], |row| {
-                    let title: String = row.get(1)?;
-                    Ok(title)
-                }) {
-                    let mut titles = Vec::new();
-                    for row in rows {
-                        if let Ok(title) = row {
-                            titles.push(title);
-                        }
-                    }
-                    titles
+            if has_children {
+                // This note has children, so it's a directory
+                let full_path = if path == "/" {
+                    format!("/{title}")
                 } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
-        };
+                    format!("{path}/{title}")
+                };
+                let inode = self.get_or_create_inode(&full_path);
+                entries.push((inode, FileType::Directory, title.clone()));
 
-        for title in note_titles {
-            // Add .md suffix to note titles for filesystem display
-            let display_title = Self::add_md_suffix(&title);
-            let full_path = if path == "/" {
-                format!("/{display_title}")
+                // Pre-create inode for index file (for future access when subdirectory is listed)
+                let extension = Self::get_extension_from_syntax(&syntax);
+                let index_filename = format!("index.{}", extension);
+                let index_path = if path == "/" {
+                    format!("/{title}/{index_filename}")
+                } else {
+                    format!("{path}/{title}/{index_filename}")
+                };
+                let _index_inode = self.get_or_create_inode(&index_path);
+                // Note: We don't add the index file to the current directory listing
+                // It will be shown when the subdirectory is listed
             } else {
-                format!("{path}/{display_title}")
-            };
-            let inode = self.get_or_create_inode(&full_path);
-            entries.push((inode, FileType::RegularFile, display_title));
+                // This note has no children, so it's a file
+                let extension = Self::get_extension_from_syntax(&syntax);
+                let filename = format!("{}.{}", title, extension);
+                let full_path = if path == "/" {
+                    format!("/{filename}")
+                } else {
+                    format!("{path}/{filename}")
+                };
+                let inode = self.get_or_create_inode(&full_path);
+                entries.push((inode, FileType::RegularFile, filename));
+            }
         }
 
-        // Handle path conflicts - if there are duplicate titles, favor the most recent based on user_updated_time
+        // If this directory corresponds to a note with content, add the index file
+        if let Some(note_id) = &current_note_id {
+            if let Ok(note_info) = self.db.query_row(
+                "SELECT title, syntax, content FROM notes WHERE id = ?1",
+                [note_id],
+                |row| {
+                    let title: String = row.get(0)?;
+                    let syntax: String = row.get(1)?;
+                    let content: String = row.get(2)?;
+                    Ok((title, syntax, content))
+                }
+            ) {
+                // Only add index file if the note has content
+                if !note_info.2.is_empty() {
+                    let extension = Self::get_extension_from_syntax(&note_info.1);
+                    let index_filename = format!("index.{}", extension);
+                    let index_path = if path == "/" {
+                        format!("/{index_filename}")
+                    } else {
+                        format!("{path}/{index_filename}")
+                    };
+                    let index_inode = self.get_or_create_inode(&index_path);
+                    entries.push((index_inode, FileType::RegularFile, index_filename));
+                }
+            }
+        }
+
+        // Handle path conflicts - if there are duplicate titles, favor the most recent based on updated_at
         let mut seen_titles = std::collections::HashSet::new();
         let mut unique_entries = Vec::new();
 
@@ -877,7 +897,7 @@ impl Filesystem for SqliteFS {
     }
 
     /// Handle directory creation operations (unified schema)
-    /// 
+    ///
     /// In the unified schema, creating a directory means creating a note that will act as a folder.
     /// The note is created with empty content initially, and if children are added later,
     /// its content becomes accessible via index.{ext}.
@@ -915,7 +935,7 @@ impl Filesystem for SqliteFS {
         // Create the note/folder in the database with empty content
         // TODO: Get actual user_id from request or configuration
         let user_id = "default_user"; // Placeholder
-        
+
         match self.create_note(&parent_path, folder_name, "", "markdown", user_id) {
             Ok(_note_id) => {
                 // Create the full path for the new directory
@@ -961,7 +981,7 @@ impl Filesystem for SqliteFS {
     }
 
     /// Handle file creation operations (unified schema)
-    /// 
+    ///
     /// Creates a new note in the database. The file extension determines the syntax type.
     /// In the unified schema, this creates a note that will be presented as a file until
     /// it gets children (at which point it becomes a directory with index.{ext} for content).
