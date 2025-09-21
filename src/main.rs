@@ -164,7 +164,6 @@ impl SqliteFS {
         Ok(current_parent_id.unwrap_or_default())
     }
 
-
     /// Generate a UUID v4 string for database record IDs
     fn generate_uuid() -> String {
         Uuid::new_v4().to_string()
@@ -185,7 +184,14 @@ impl SqliteFS {
     /// Returns:
     /// - Ok(String): UUID of the newly created note
     /// - Err: Database error if insertion fails
-    fn create_note(&mut self, parent_path: &str, title: &str, content: &str, syntax: &str, user_id: &str) -> Result<String> {
+    fn create_note(
+        &mut self,
+        parent_path: &str,
+        title: &str,
+        content: &str,
+        syntax: &str,
+        user_id: &str,
+    ) -> Result<String> {
         // Get the parent note ID (could be None for root level)
         let parent_id = if parent_path == "/" {
             None
@@ -363,14 +369,18 @@ impl Filesystem for SqliteFS {
                 let created_at: String = row.get(4)?;
                 let updated_at: String = row.get(5)?;
                 Ok((id, content, syntax, created_at, updated_at))
-            }
+            },
         ) {
             // Check if this note has children (making it a directory)
-            let has_children = self.db.query_row(
-                "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-                [&note_result.0],
-                |row| row.get::<_, i64>(0)
-            ).unwrap_or(0) > 0;
+            let has_children = self
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                    [&note_result.0],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
 
             if has_children {
                 // This note has children, so it's a directory
@@ -412,14 +422,18 @@ impl Filesystem for SqliteFS {
                     let created_at: String = row.get(4)?;
                     let updated_at: String = row.get(5)?;
                     Ok((id, content, syntax, created_at, updated_at))
-                }
+                },
             ) {
                 // Check if this note has children
-                let has_children = self.db.query_row(
-                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-                    [&note_result.0],
-                    |row| row.get::<_, i64>(0)
-                ).unwrap_or(0) > 0;
+                let has_children = self
+                    .db
+                    .query_row(
+                        "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                        [&note_result.0],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
 
                 if !has_children {
                     // This note has no children, so it's a file
@@ -568,14 +582,18 @@ impl Filesystem for SqliteFS {
                 let created_at: String = row.get(4)?;
                 let updated_at: String = row.get(5)?;
                 Ok((id, content, syntax, created_at, updated_at))
-            }
+            },
         ) {
             // Check if this note has children (making it a directory)
-            let has_children = self.db.query_row(
-                "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-                [&note_result.0],
-                |row| row.get::<_, i64>(0)
-            ).unwrap_or(0) > 0;
+            let has_children = self
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                    [&note_result.0],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
 
             if has_children {
                 // This note has children, so it's a directory
@@ -616,14 +634,18 @@ impl Filesystem for SqliteFS {
                     let created_at: String = row.get(4)?;
                     let updated_at: String = row.get(5)?;
                     Ok((id, content, syntax, created_at, updated_at))
-                }
+                },
             ) {
                 // Check if this note has children
-                let has_children = self.db.query_row(
-                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-                    [&note_result.0],
-                    |row| row.get::<_, i64>(0)
-                ).unwrap_or(0) > 0;
+                let has_children = self
+                    .db
+                    .query_row(
+                        "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                        [&note_result.0],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
 
                 if !has_children {
                     // This note has no children, so it's a file
@@ -710,7 +732,7 @@ impl Filesystem for SqliteFS {
                         let content: String = row.get(0)?;
                         let syntax: String = row.get(1)?;
                         Ok((content, syntax))
-                    }
+                    },
                 ) {
                     let expected_ext = &content.1;
                     let expected_index = format!("index.{}", expected_ext);
@@ -745,14 +767,18 @@ impl Filesystem for SqliteFS {
                     let content: String = row.get(1)?;
                     let syntax: String = row.get(2)?;
                     Ok((id, content, syntax))
-                }
+                },
             ) {
                 // Check if this note has children (should be a file for reading)
-                let has_children = self.db.query_row(
-                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-                    [&note_result.0],
-                    |row| row.get::<_, i64>(0)
-                ).unwrap_or(0) > 0;
+                let has_children = self
+                    .db
+                    .query_row(
+                        "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                        [&note_result.0],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
 
                 if !has_children {
                     // This note has no children, so it's a file
@@ -810,7 +836,8 @@ impl Filesystem for SqliteFS {
         };
 
         // Query all child notes under this directory
-        let child_query = "SELECT id, title, syntax FROM notes WHERE parent_id IS ?1 ORDER BY updated_at DESC";
+        let child_query =
+            "SELECT id, title, syntax FROM notes WHERE parent_id IS ?1 ORDER BY updated_at DESC";
 
         // First, collect all the child note data
         let child_notes: Vec<(String, String, String)> = {
@@ -833,11 +860,15 @@ impl Filesystem for SqliteFS {
         // Now process the collected data without holding database borrows
         for (note_id, title, syntax) in child_notes {
             // Check if this note has children to determine if it's a directory
-            let has_children = self.db.query_row(
-                "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-                [&note_id],
-                |row| row.get::<_, i64>(0)
-            ).unwrap_or(0) > 0;
+            let has_children = self
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                    [&note_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
 
             if has_children {
                 // This note has children, so it's a directory
@@ -884,7 +915,7 @@ impl Filesystem for SqliteFS {
                     let syntax: String = row.get(1)?;
                     let content: String = row.get(2)?;
                     Ok((title, syntax, content))
-                }
+                },
             ) {
                 // Only add index file if the note has content
                 if !note_info.2.is_empty() {
@@ -1157,7 +1188,7 @@ impl Filesystem for SqliteFS {
                 let current_content = match self.db.query_row(
                     "SELECT content FROM notes WHERE id = ?1",
                     [parent_id],
-                    |row| row.get::<_, String>(0)
+                    |row| row.get::<_, String>(0),
                 ) {
                     Ok(content) => content,
                     Err(_) => {
@@ -1226,7 +1257,7 @@ impl Filesystem for SqliteFS {
                     let content: String = row.get(1)?;
                     let syntax: String = row.get(2)?;
                     Ok((id, content, syntax))
-                }
+                },
             ) {
                 // Verify the extension matches the note's syntax
                 let expected_ext = &note_result.2;
@@ -1236,11 +1267,15 @@ impl Filesystem for SqliteFS {
                 }
 
                 // Check that this note has no children (is a file, not a directory)
-                let has_children = self.db.query_row(
-                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-                    [&note_result.0],
-                    |row| row.get::<_, i64>(0)
-                ).unwrap_or(0) > 0;
+                let has_children = self
+                    .db
+                    .query_row(
+                        "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                        [&note_result.0],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
 
                 if has_children {
                     // This note has children, so it's a directory - can't write to it directly
@@ -1337,16 +1372,19 @@ impl Filesystem for SqliteFS {
         if filename.starts_with("index.") {
             if let Some(parent_id) = &parent_note_id {
                 // Check if the parent note exists and verify extension matches syntax
-                let note_exists = self.db.query_row(
-                    "SELECT syntax FROM notes WHERE id = ?1",
-                    [parent_id],
-                    |row| {
-                        let syntax: String = row.get(0)?;
-                        let expected_ext = &syntax;
-                        let expected_index = format!("index.{}", expected_ext);
-                        Ok(filename == expected_index)
-                    }
-                ).unwrap_or(false);
+                let note_exists = self
+                    .db
+                    .query_row(
+                        "SELECT syntax FROM notes WHERE id = ?1",
+                        [parent_id],
+                        |row| {
+                            let syntax: String = row.get(0)?;
+                            let expected_ext = &syntax;
+                            let expected_index = format!("index.{}", expected_ext);
+                            Ok(filename == expected_index)
+                        },
+                    )
+                    .unwrap_or(false);
 
                 if note_exists {
                     reply.opened(ino, 0);
@@ -1381,7 +1419,7 @@ impl Filesystem for SqliteFS {
                 let id: String = row.get(0)?;
                 let syntax: String = row.get(1)?;
                 Ok((id, syntax))
-            }
+            },
         ) {
             // Verify the file extension matches the note's syntax
             if let Some(req_ext) = requested_ext {
@@ -1393,11 +1431,15 @@ impl Filesystem for SqliteFS {
             }
 
             // Check if this note has children (making it a directory)
-            let has_children = self.db.query_row(
-                "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-                [&note_id],
-                |row| row.get::<_, i64>(0)
-            ).unwrap_or(0) > 0;
+            let has_children = self
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                    [&note_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
 
             if has_children {
                 // This note has children, so it should be accessed as a directory, not a file
@@ -1480,7 +1522,7 @@ impl Filesystem for SqliteFS {
                 let current_content = match self.db.query_row(
                     "SELECT content FROM notes WHERE id = ?1",
                     [&parent_note_id],
-                    |row| row.get::<_, String>(0)
+                    |row| row.get::<_, String>(0),
                 ) {
                     Ok(content) => content,
                     Err(_) => {
@@ -1521,7 +1563,7 @@ impl Filesystem for SqliteFS {
                     let created: String = row.get(1)?;
                     let updated: String = row.get(2)?;
                     Ok((content.len(), created, updated))
-                }
+                },
             ) {
                 Ok(data) => data,
                 Err(_) => {
@@ -1802,7 +1844,7 @@ impl Filesystem for SqliteFS {
 
                             let update_result = self.db.execute(
                                 "UPDATE notes SET syntax = ?1, updated_at = ?2 WHERE id = ?3",
-                                rusqlite::params![new_extension, &now, parent_id]
+                                rusqlite::params![new_extension, &now, parent_id],
                             );
 
                             match update_result {
@@ -1866,7 +1908,7 @@ impl Filesystem for SqliteFS {
                 let id: String = row.get(0)?;
                 let syntax: String = row.get(1)?;
                 Ok((id, syntax))
-            }
+            },
         );
 
         let (note_id, current_syntax) = match note_result {
@@ -1887,11 +1929,15 @@ impl Filesystem for SqliteFS {
         }
 
         // Check if this note has children to determine if it's a directory
-        let has_children = self.db.query_row(
-            "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-            [&note_id],
-            |row| row.get::<_, i64>(0)
-        ).unwrap_or(0) > 0;
+        let has_children = self
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                [&note_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
 
         // Determine the new extension
         let new_extension = if has_children {
@@ -2020,7 +2066,7 @@ impl Filesystem for SqliteFS {
                 if let Ok(parent_syntax) = self.db.query_row(
                     "SELECT syntax FROM notes WHERE id = ?1",
                     [parent_id],
-                    |row| row.get::<_, String>(0)
+                    |row| row.get::<_, String>(0),
                 ) {
                     // Extract the requested extension
                     if let Some(dot_pos) = filename.rfind('.') {
@@ -2093,7 +2139,7 @@ impl Filesystem for SqliteFS {
                 let id: String = row.get(0)?;
                 let syntax: String = row.get(1)?;
                 Ok((id, syntax))
-            }
+            },
         );
 
         let (note_id, note_syntax) = match note_result {
@@ -2115,11 +2161,15 @@ impl Filesystem for SqliteFS {
         }
 
         // Check if this note has children (if so, it's a directory and cannot be deleted as a file)
-        let has_children = self.db.query_row(
-            "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
-            [&note_id],
-            |row| row.get::<_, i64>(0)
-        ).unwrap_or(0) > 0;
+        let has_children = self
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                [&note_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
 
         if has_children {
             // This note has children, so it's a directory - cannot delete as a file
@@ -2128,10 +2178,9 @@ impl Filesystem for SqliteFS {
         }
 
         // Delete the note (it's a leaf note with no children)
-        let result = self.db.execute(
-            "DELETE FROM notes WHERE id = ?1",
-            [&note_id],
-        );
+        let result = self
+            .db
+            .execute("DELETE FROM notes WHERE id = ?1", [&note_id]);
 
         match result {
             Ok(rows_affected) => {
