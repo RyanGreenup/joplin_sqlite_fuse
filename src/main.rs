@@ -1072,16 +1072,17 @@ impl Filesystem for SqliteFS {
         }
     }
 
-    /// Handle file write operations
-    /// This method is called when applications write data to open files.
-    /// It supports both overwriting (offset 0) and appending/inserting at specific offsets.
-    /// The content is immediately written to the database's 'body' field.
+    /// Handle file write operations (unified schema)
+    /// 
+    /// This method handles writing to both regular files and index files in the unified schema.
+    /// The content is immediately written to the database's 'content' field.
     ///
     /// Key behaviors:
     /// - offset 0: Completely overwrites existing content
     /// - offset > 0: Inserts/appends data at the specified position
-    /// - Updates timestamps (updated_time, user_updated_time) in database
-    /// - Strips .md suffix when looking up notes in database
+    /// - Updates timestamps (updated_at) in database
+    /// - Supports writing to index files (`index.{ext}`) which write to the parent note's content
+    /// - Supports writing to regular files (`{title}.{ext}`) which are leaf notes
     fn write(
         &mut self,
         _req: &Request,
@@ -1111,74 +1112,163 @@ impl Filesystem for SqliteFS {
             ("/", &path[..])
         };
 
-        // Get the parent folder ID and strip .md suffix for database lookup
-        let parent_folder_id = match self.get_parent_folder_id(parent_path) {
-            Ok(id) => id,
-            Err(_) => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let db_title = Self::strip_md_suffix(filename);
-
-        // Get the current content of the note
-        let current_content = match self.db.query_row(
-            "SELECT body FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
-            [&parent_folder_id, db_title],
-            |row| row.get::<_, String>(0)
-        ) {
-            Ok(content) => content,
-            Err(_) => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        // Handle the write operation
-        let new_content = if offset == 0 {
-            // Overwrite from the beginning
-            String::from_utf8_lossy(data).to_string()
+        // Get the parent note ID (unified schema)
+        let parent_note_id = if parent_path == "/" {
+            None
         } else {
-            // Append or insert at offset
-            let mut content_bytes = current_content.into_bytes();
-            let start_pos = offset as usize;
-
-            if start_pos > content_bytes.len() {
-                // If offset is beyond current content, pad with zeros
-                content_bytes.resize(start_pos, 0);
+            match self.get_parent_folder_id(parent_path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
+                }
             }
-
-            // Replace or extend content
-            if start_pos + data.len() <= content_bytes.len() {
-                // Replace existing content
-                content_bytes[start_pos..start_pos + data.len()].copy_from_slice(data);
-            } else {
-                // Extend content
-                content_bytes.truncate(start_pos);
-                content_bytes.extend_from_slice(data);
-            }
-
-            String::from_utf8_lossy(&content_bytes).to_string()
         };
 
-        // Update the note in the database
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        // Handle index file writes (writing to parent note's content)
+        if filename.starts_with("index.") {
+            if let Some(parent_id) = &parent_note_id {
+                // Get current content of the parent note
+                let current_content = match self.db.query_row(
+                    "SELECT content FROM notes WHERE id = ?1",
+                    [parent_id],
+                    |row| row.get::<_, String>(0)
+                ) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
 
-        match self.db.execute(
-            "UPDATE notes SET body = ?1, updated_time = ?2, user_updated_time = ?3 WHERE parent_id = ?4 AND title = ?5 AND deleted_time = 0",
-            [&new_content, &now.to_string(), &now.to_string(), &parent_folder_id, db_title],
-        ) {
-            Ok(_) => {
-                reply.written(data.len() as u32);
-            }
-            Err(_) => {
-                reply.error(libc::EIO);
+                // Handle the write operation
+                let new_content = if offset == 0 {
+                    // Overwrite from the beginning
+                    String::from_utf8_lossy(data).to_string()
+                } else {
+                    // Append or insert at offset
+                    let mut content_bytes = current_content.into_bytes();
+                    let start_pos = offset as usize;
+
+                    if start_pos > content_bytes.len() {
+                        // If offset is beyond current content, pad with zeros
+                        content_bytes.resize(start_pos, 0);
+                    }
+
+                    // Replace or extend content
+                    if start_pos + data.len() <= content_bytes.len() {
+                        // Replace existing content
+                        content_bytes[start_pos..start_pos + data.len()].copy_from_slice(data);
+                    } else {
+                        // Extend content
+                        content_bytes.truncate(start_pos);
+                        content_bytes.extend_from_slice(data);
+                    }
+
+                    String::from_utf8_lossy(&content_bytes).to_string()
+                };
+
+                // Update the parent note's content
+                let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                match self.db.execute(
+                    "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![&new_content, &now, parent_id],
+                ) {
+                    Ok(_) => {
+                        reply.written(data.len() as u32);
+                    }
+                    Err(_) => {
+                        reply.error(libc::EIO);
+                    }
+                }
+                return;
             }
         }
+
+        // Handle regular file writes (writing to leaf note's content)
+        if let Some(dot_pos) = filename.rfind('.') {
+            let title_without_ext = &filename[..dot_pos];
+            let requested_ext = &filename[dot_pos + 1..];
+
+            // Look up the note by title (without extension)
+            let note_query = "SELECT id, content, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
+            
+            if let Ok(note_result) = self.db.query_row(
+                note_query,
+                rusqlite::params![parent_note_id, title_without_ext],
+                |row| {
+                    let id: String = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    let syntax: String = row.get(2)?;
+                    Ok((id, content, syntax))
+                }
+            ) {
+                // Verify the extension matches the note's syntax
+                let expected_ext = Self::get_extension_from_syntax(&note_result.2);
+                if requested_ext != expected_ext {
+                    reply.error(ENOENT);
+                    return;
+                }
+
+                // Check that this note has no children (is a file, not a directory)
+                let has_children = self.db.query_row(
+                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                    [&note_result.0],
+                    |row| row.get::<_, i64>(0)
+                ).unwrap_or(0) > 0;
+
+                if has_children {
+                    // This note has children, so it's a directory - can't write to it directly
+                    // User should write to the index file instead
+                    reply.error(libc::EISDIR);
+                    return;
+                }
+
+                // Handle the write operation
+                let new_content = if offset == 0 {
+                    // Overwrite from the beginning
+                    String::from_utf8_lossy(data).to_string()
+                } else {
+                    // Append or insert at offset
+                    let mut content_bytes = note_result.1.into_bytes();
+                    let start_pos = offset as usize;
+
+                    if start_pos > content_bytes.len() {
+                        // If offset is beyond current content, pad with zeros
+                        content_bytes.resize(start_pos, 0);
+                    }
+
+                    // Replace or extend content
+                    if start_pos + data.len() <= content_bytes.len() {
+                        // Replace existing content
+                        content_bytes[start_pos..start_pos + data.len()].copy_from_slice(data);
+                    } else {
+                        // Extend content
+                        content_bytes.truncate(start_pos);
+                        content_bytes.extend_from_slice(data);
+                    }
+
+                    String::from_utf8_lossy(&content_bytes).to_string()
+                };
+
+                // Update the note's content
+                let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                match self.db.execute(
+                    "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![&new_content, &now, &note_result.0],
+                ) {
+                    Ok(_) => {
+                        reply.written(data.len() as u32);
+                    }
+                    Err(_) => {
+                        reply.error(libc::EIO);
+                    }
+                }
+                return;
+            }
+        }
+
+        reply.error(ENOENT);
     }
 
     /// Handle file opening operations
