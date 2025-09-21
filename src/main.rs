@@ -73,13 +73,13 @@ impl SqliteFS {
 
     fn get_parent_folder_id(&self, parent_path: &str) -> Result<String> {
         if parent_path == "/" {
-            // Root directory - empty parent_id
+            // Root directory - NULL parent_id
             return Ok("".to_string());
         }
 
         // Split the path and find the folder ID by walking through the hierarchy
         let path_parts: Vec<&str> = parent_path.trim_start_matches('/').split('/').collect();
-        let mut current_parent_id = "".to_string();
+        let mut current_parent_id: Option<String> = None;
 
         for part in path_parts {
             if part.is_empty() {
@@ -87,16 +87,17 @@ impl SqliteFS {
             }
 
             // Find the folder with this title under current_parent_id
+            // In the new schema, folders are represented as notes without content
             let folder_id: String = self.db.query_row(
-                "SELECT id FROM folders WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1",
-                [&current_parent_id, part],
+                "SELECT id FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1",
+                [current_parent_id.as_deref(), part],
                 |row| row.get(0)
             )?;
 
-            current_parent_id = folder_id;
+            current_parent_id = Some(folder_id);
         }
 
-        Ok(current_parent_id)
+        Ok(current_parent_id.unwrap_or_default())
     }
 
     fn strip_md_suffix(filename: &str) -> &str {
