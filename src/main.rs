@@ -668,25 +668,88 @@ impl Filesystem for SqliteFS {
             ("/", &path[..])
         };
 
-        // Query database for the note content (strip .md suffix when looking up in database)
-        let note_query = "SELECT body FROM notes WHERE parent_id = ?1 AND title = ?2 AND deleted_time = 0 ORDER BY user_updated_time DESC LIMIT 1";
-
-        if let Ok(parent_folder_id) = self.get_parent_folder_id(parent_path) {
-            if let Ok(mut stmt) = self.db.prepare(note_query) {
-                // Strip .md suffix when querying the database
-                let db_title = Self::strip_md_suffix(filename);
-                if let Ok(body) = stmt.query_row([&parent_folder_id, db_title], |row| {
-                    let body: String = row.get(0)?;
-                    Ok(body)
-                }) {
-                    let content = body.as_bytes();
-                    let start = offset as usize;
-                    if start < content.len() {
-                        reply.data(&content[start..]);
-                    } else {
-                        reply.data(&[]);
-                    }
+        // Get parent note ID (None for root level)
+        let parent_note_id = if parent_path == "/" {
+            None
+        } else {
+            match self.get_parent_folder_id(parent_path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
                     return;
+                }
+            }
+        };
+
+        // Handle special case for index files (index.{ext})
+        if filename.starts_with("index.") {
+            if let Some(parent_id) = &parent_note_id {
+                // Look up the parent note to get its content via index file
+                if let Ok(content) = self.db.query_row(
+                    "SELECT content, syntax FROM notes WHERE id = ?1",
+                    [parent_id],
+                    |row| {
+                        let content: String = row.get(0)?;
+                        let syntax: String = row.get(1)?;
+                        Ok((content, syntax))
+                    }
+                ) {
+                    let expected_ext = Self::get_extension_from_syntax(&content.1);
+                    let expected_index = format!("index.{}", expected_ext);
+                    
+                    if filename == expected_index {
+                        let content_bytes = content.0.as_bytes();
+                        let start = offset as usize;
+                        if start < content_bytes.len() {
+                            reply.data(&content_bytes[start..]);
+                        } else {
+                            reply.data(&[]);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Query database for note content (unified schema)
+        let note_query = "SELECT id, content, syntax FROM notes WHERE parent_id IS ?1 AND title = ?2 ORDER BY updated_at DESC LIMIT 1";
+        
+        // Try stripping file extension and matching title (for files)
+        if let Some(dot_pos) = filename.rfind('.') {
+            let title_without_ext = &filename[..dot_pos];
+            let requested_ext = &filename[dot_pos + 1..];
+            
+            if let Ok(note_result) = self.db.query_row(
+                note_query,
+                rusqlite::params![parent_note_id, title_without_ext],
+                |row| {
+                    let id: String = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    let syntax: String = row.get(2)?;
+                    Ok((id, content, syntax))
+                }
+            ) {
+                // Check if this note has children (should be a file for reading)
+                let has_children = self.db.query_row(
+                    "SELECT COUNT(*) FROM notes WHERE parent_id = ?1",
+                    [&note_result.0],
+                    |row| row.get::<_, i64>(0)
+                ).unwrap_or(0) > 0;
+
+                if !has_children {
+                    // This note has no children, so it's a file
+                    // Verify the extension matches the syntax
+                    let expected_ext = Self::get_extension_from_syntax(&note_result.2);
+                    if requested_ext == expected_ext {
+                        let content_bytes = note_result.1.as_bytes();
+                        let start = offset as usize;
+                        if start < content_bytes.len() {
+                            reply.data(&content_bytes[start..]);
+                        } else {
+                            reply.data(&[]);
+                        }
+                        return;
+                    }
                 }
             }
         }
