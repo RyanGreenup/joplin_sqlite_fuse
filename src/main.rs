@@ -23,7 +23,7 @@ const TTL: Duration = Duration::from_secs(1); // 1 second
 /// CREATE TABLE notes (
 ///     id TEXT PRIMARY KEY,
 ///     title TEXT NOT NULL,
-///     abstract TEXT,
+///     abstract TEXT,              -- NOTE: Not used by FUSE filesystem
 ///     content TEXT NOT NULL,
 ///     syntax TEXT NOT NULL DEFAULT 'markdown',
 ///     parent_id TEXT,
@@ -170,76 +170,77 @@ impl SqliteFS {
         Uuid::new_v4().to_string()
     }
 
-    /// Create a new folder in the database
+    /// Create a new note in the database (unified schema)
     ///
-    /// This helper method handles the database insertion for new folders,
-    /// including UUID generation, timestamp management, and parent relationship setup.
-    ///
-    /// Arguments:
-    /// - parent_path: Filesystem path of the parent directory (e.g., "/Projects")
-    /// - folder_name: Name of the new folder to create
-    ///
-    /// Returns:
-    /// - Ok(String): UUID of the newly created folder
-    /// - Err: Database error if insertion fails
-    fn create_folder(&mut self, parent_path: &str, folder_name: &str) -> Result<String> {
-        // Get the parent folder ID
-        let parent_folder_id = self.get_parent_folder_id(parent_path)?;
-
-        // Generate new UUID for the folder
-        let folder_id = Self::generate_uuid();
-
-        // Get current timestamp
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        // Insert new folder into database
-        self.db.execute(
-            "INSERT INTO folders (id, title, created_time, updated_time, user_created_time, user_updated_time, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            [&folder_id, folder_name, &now.to_string(), &now.to_string(), &now.to_string(), &now.to_string(), &parent_folder_id],
-        )?;
-
-        Ok(folder_id)
-    }
-
-    /// Create a new note (file) in the database
-    ///
-    /// This helper method handles the database insertion for new notes,
-    /// including UUID generation, content storage, and parent relationship setup.
+    /// In the new unified schema, both files and folders are represented as notes.
+    /// A note becomes a folder when it has children, and its content is accessible via index.{ext}.
     ///
     /// Arguments:
     /// - parent_path: Filesystem path of the parent directory (e.g., "/Projects")
-    /// - file_name: Name of the new file (with .md suffix, will be stripped for DB)
-    /// - content: Initial content to store in the note's body field
+    /// - title: Title of the note (without file extension)
+    /// - content: Content to store in the note's content field
+    /// - syntax: Syntax type (e.g., "markdown", "text", "code")
+    /// - user_id: ID of the user creating the note
     ///
     /// Returns:
     /// - Ok(String): UUID of the newly created note
     /// - Err: Database error if insertion fails
-    fn create_note(&mut self, parent_path: &str, file_name: &str, content: &str) -> Result<String> {
-        // Get the parent folder ID
-        let parent_folder_id = self.get_parent_folder_id(parent_path)?;
-
-        // Strip .md suffix from filename for database storage
-        let note_title = Self::strip_md_suffix(file_name);
+    fn create_note(&mut self, parent_path: &str, title: &str, content: &str, syntax: &str, user_id: &str) -> Result<String> {
+        // Get the parent note ID (could be None for root level)
+        let parent_id = if parent_path == "/" {
+            None
+        } else {
+            Some(self.get_parent_folder_id(parent_path)?)
+        };
 
         // Generate new UUID for the note
         let note_id = Self::generate_uuid();
 
-        // Get current timestamp
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        // Get current timestamp as string (matching the existing data format)
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         // Insert new note into database
+        // Note: abstract field is not used by FUSE filesystem, left empty
         self.db.execute(
-            "INSERT INTO notes (id, title, body, created_time, updated_time, user_created_time, user_updated_time, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            [&note_id, note_title, content, &now.to_string(), &now.to_string(), &now.to_string(), &now.to_string(), &parent_folder_id],
+            "INSERT INTO notes (id, title, abstract, content, syntax, parent_id, user_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![&note_id, title, "", content, syntax, parent_id, user_id, &now, &now],
         )?;
 
         Ok(note_id)
+    }
+
+    /// Helper function to get file extension from syntax
+    fn get_extension_from_syntax(syntax: &str) -> &str {
+        match syntax {
+            "markdown" => "md",
+            "python" => "py",
+            "javascript" => "js",
+            "typescript" => "ts",
+            "rust" => "rs",
+            "html" => "html",
+            "css" => "css",
+            "json" => "json",
+            "yaml" => "yml",
+            "xml" => "xml",
+            _ => "txt",
+        }
+    }
+
+    /// Helper function to get syntax from file extension
+    fn get_syntax_from_extension(extension: &str) -> &str {
+        match extension {
+            "md" => "markdown",
+            "py" => "python", 
+            "js" => "javascript",
+            "ts" => "typescript",
+            "rs" => "rust",
+            "html" => "html",
+            "css" => "css",
+            "json" => "json",
+            "yml" | "yaml" => "yaml",
+            "xml" => "xml",
+            _ => "text",
+        }
     }
 }
 
@@ -650,15 +651,16 @@ impl Filesystem for SqliteFS {
         reply.ok();
     }
 
-    /// Handle directory creation operations
-    /// This method is called when users create new directories using mkdir().
-    /// It creates a new folder record in the database with proper UUID and parent relationships.
+    /// Handle directory creation operations (unified schema)
+    /// 
+    /// In the unified schema, creating a directory means creating a note that will act as a folder.
+    /// The note is created with empty content initially, and if children are added later,
+    /// its content becomes accessible via index.{ext}.
     ///
     /// Key behaviors:
-    /// - Generates UUID v4 for the new folder's database ID
-    /// - Resolves parent path to parent folder UUID for database foreign key
-    /// - Sets appropriate timestamps (created_time, updated_time, etc.)
-    /// - Creates filesystem inode mapping for the new directory
+    /// - Creates a note in the database that represents a directory
+    /// - Uses default syntax "markdown" for new directories
+    /// - TODO: Need user_id - for now using placeholder
     fn mkdir(
         &mut self,
         _req: &Request,
@@ -685,17 +687,20 @@ impl Filesystem for SqliteFS {
             }
         };
 
-        // Create the folder in the database
-        match self.create_folder(&parent_path, folder_name) {
-            Ok(_folder_id) => {
-                // Create the full path for the new folder
+        // Create the note/folder in the database with empty content
+        // TODO: Get actual user_id from request or configuration
+        let user_id = "default_user"; // Placeholder
+        
+        match self.create_note(&parent_path, folder_name, "", "markdown", user_id) {
+            Ok(_note_id) => {
+                // Create the full path for the new directory
                 let full_path = if parent_path == "/" {
                     format!("/{folder_name}")
                 } else {
                     format!("{parent_path}/{folder_name}")
                 };
 
-                // Create inode for the new folder
+                // Create inode for the new directory
                 let inode = self.get_or_create_inode(&full_path);
 
                 // Get current timestamp for attributes
@@ -730,10 +735,11 @@ impl Filesystem for SqliteFS {
         }
     }
 
-    /// Handle file creation operations
-    /// This method is called when new files are created using open() with O_CREAT flag
-    /// or when using system calls like creat(). It creates a new note in the database
-    /// and returns file attributes along with a file handle.
+    /// Handle file creation operations (unified schema)
+    /// 
+    /// Creates a new note in the database. The file extension determines the syntax type.
+    /// In the unified schema, this creates a note that will be presented as a file until
+    /// it gets children (at which point it becomes a directory with index.{ext} for content).
     fn create(
         &mut self,
         _req: &Request,
@@ -761,8 +767,22 @@ impl Filesystem for SqliteFS {
             }
         };
 
+        // Extract title and syntax from filename
+        let (title, syntax) = if let Some(dot_pos) = file_name.rfind('.') {
+            let title = &file_name[..dot_pos];
+            let extension = &file_name[dot_pos + 1..];
+            let syntax = Self::get_syntax_from_extension(extension);
+            (title, syntax)
+        } else {
+            // No extension, default to text
+            (file_name, "text")
+        };
+
+        // TODO: Get actual user_id from request or configuration
+        let user_id = "default_user"; // Placeholder
+
         // Create the note in the database with empty content initially
-        match self.create_note(&parent_path, file_name, "") {
+        match self.create_note(&parent_path, title, "", syntax, user_id) {
             Ok(_note_id) => {
                 // Create the full path for the new file
                 let full_path = if parent_path == "/" {
