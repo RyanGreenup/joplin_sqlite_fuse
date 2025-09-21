@@ -1679,17 +1679,20 @@ impl Filesystem for SqliteFS {
         }
     }
 
-    /// Handle file and directory renaming operations
-    /// This method is called when a file or directory is renamed (e.g., using mv command).
-    /// It updates the database to reflect the new name while preserving all other metadata.
-    ///
+    /// Handle file and directory renaming operations (unified schema)
+    /// 
+    /// In the unified schema, renaming works on notes regardless of whether they're
+    /// currently presented as files or directories. The operation handles:
+    /// - Title changes (with proper extension handling)
+    /// - Moving between directories (parent_id changes)
+    /// - Updating timestamps
+    /// 
     /// Key behaviors:
-    /// - Updates the 'title' field in the database for the renamed item
-    /// - Handles both files (notes) and directories (folders)
-    /// - Strips .md suffix from filenames before storing in database
-    /// - Updates the user_updated_time timestamp
-    /// - Maintains proper parent-child relationships
-    /// - Required for proper file manager and shell integration
+    /// - Single table operation (notes table only)
+    /// - Handles both file and directory renaming automatically
+    /// - Strips extensions when storing titles in database
+    /// - Updates inode mappings for renamed items and their descendants
+    /// - Proper NULL handling for parent_id
     fn rename(
         &mut self,
         _req: &Request,
@@ -1733,108 +1736,101 @@ impl Filesystem for SqliteFS {
             }
         };
 
-        // Get parent folder IDs from database
-        let parent_folder_id = match self.get_parent_folder_id(&parent_path) {
-            Ok(id) => id,
-            Err(_) => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let new_parent_folder_id = match self.get_parent_folder_id(&new_parent_path) {
-            Ok(id) => id,
-            Err(_) => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        // Try to rename as a file first (strip .md suffix for database)
-        let old_title = Self::strip_md_suffix(old_name);
-        let new_title = Self::strip_md_suffix(new_name);
-
-        let file_result = self.db.execute(
-            "UPDATE notes SET title = ?1, parent_id = ?2, user_updated_time = ?3 WHERE parent_id = ?4 AND title = ?5 AND deleted_time = 0",
-            [new_title, &new_parent_folder_id, &current_time.to_string(), &parent_folder_id, old_title]
-        );
-
-        if let Ok(rows_affected) = file_result {
-            if rows_affected > 0 {
-                // Successfully renamed a file
-                // Update inode mappings
-                let old_path = if parent_path == "/" {
-                    format!("/{old_name}")
-                } else {
-                    format!("{parent_path}/{old_name}")
-                };
-
-                let new_path = if new_parent_path == "/" {
-                    format!("/{new_name}")
-                } else {
-                    format!("{new_parent_path}/{new_name}")
-                };
-
-                // Update inode mappings
-                if let Some(inode) = self.inode_map.remove(&old_path) {
-                    self.inode_map.insert(new_path.clone(), inode);
-                    self.reverse_inode_map.insert(inode, new_path);
+        // Get parent note IDs from database (None for root level)
+        let parent_note_id = if parent_path == "/" {
+            None
+        } else {
+            match self.get_parent_folder_id(&parent_path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
                 }
-
-                reply.ok();
-                return;
             }
-        }
+        };
 
-        // Try to rename as a folder
-        let folder_result = self.db.execute(
-            "UPDATE folders SET title = ?1, parent_id = ?2, user_updated_time = ?3 WHERE parent_id = ?4 AND title = ?5 AND deleted_time = 0",
-            [new_name, &new_parent_folder_id, &current_time.to_string(), &parent_folder_id, old_name]
+        let new_parent_note_id = if new_parent_path == "/" {
+            None
+        } else {
+            match self.get_parent_folder_id(&new_parent_path) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            }
+        };
+
+        // Get current timestamp as string (matching existing data format)
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        // Determine old and new titles by stripping extensions if present
+        let old_title = if let Some(dot_pos) = old_name.rfind('.') {
+            &old_name[..dot_pos]
+        } else {
+            old_name
+        };
+
+        let new_title = if let Some(dot_pos) = new_name.rfind('.') {
+            &new_name[..dot_pos]
+        } else {
+            new_name
+        };
+
+        // Find and update the note in the unified table
+        let update_result = self.db.execute(
+            "UPDATE notes SET title = ?1, parent_id = ?2, updated_at = ?3 WHERE parent_id IS ?4 AND title = ?5",
+            rusqlite::params![new_title, new_parent_note_id, &now, parent_note_id, old_title]
         );
 
-        if let Ok(rows_affected) = folder_result {
-            if rows_affected > 0 {
-                // Successfully renamed a folder
-                // Update inode mappings
-                let old_path = if parent_path == "/" {
-                    format!("/{old_name}")
-                } else {
-                    format!("{parent_path}/{old_name}")
-                };
+        match update_result {
+            Ok(rows_affected) => {
+                if rows_affected > 0 {
+                    // Successfully renamed the note
+                    // Update inode mappings for the renamed item and all its descendants
+                    let old_path = if parent_path == "/" {
+                        format!("/{old_name}")
+                    } else {
+                        format!("{parent_path}/{old_name}")
+                    };
 
-                let new_path = if new_parent_path == "/" {
-                    format!("/{new_name}")
-                } else {
-                    format!("{new_parent_path}/{new_name}")
-                };
+                    let new_path = if new_parent_path == "/" {
+                        format!("/{new_name}")
+                    } else {
+                        format!("{new_parent_path}/{new_name}")
+                    };
 
-                // Update inode mappings for the folder and all its descendants
-                let mut paths_to_update = Vec::new();
-                for (path, inode) in &self.inode_map {
-                    if path.starts_with(&old_path) {
-                        let new_descendant_path = path.replacen(&old_path, &new_path, 1);
-                        paths_to_update.push((path.clone(), new_descendant_path, *inode));
+                    // Collect paths to update (including descendants)
+                    let mut paths_to_update = Vec::new();
+                    for (path, inode) in &self.inode_map {
+                        if path == &old_path || path.starts_with(&format!("{old_path}/")) {
+                            let new_descendant_path = if path == &old_path {
+                                new_path.clone()
+                            } else {
+                                path.replacen(&old_path, &new_path, 1)
+                            };
+                            paths_to_update.push((path.clone(), new_descendant_path, *inode));
+                        }
                     }
-                }
 
-                for (old_path, new_path, inode) in paths_to_update {
-                    self.inode_map.remove(&old_path);
-                    self.inode_map.insert(new_path.clone(), inode);
-                    self.reverse_inode_map.insert(inode, new_path);
-                }
+                    // Apply the inode mapping updates
+                    for (old_path, new_path, inode) in paths_to_update {
+                        self.inode_map.remove(&old_path);
+                        self.inode_map.insert(new_path.clone(), inode);
+                        self.reverse_inode_map.insert(inode, new_path);
+                    }
 
-                reply.ok();
-                return;
+                    reply.ok();
+                } else {
+                    // No rows affected - note not found
+                    reply.error(ENOENT);
+                }
+            }
+            Err(_) => {
+                // Database error
+                reply.error(libc::EIO);
             }
         }
-
-        // Neither file nor folder was found
-        reply.error(ENOENT);
     }
 
     /// Handle file deletion operations
